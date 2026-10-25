@@ -1,8 +1,8 @@
 import 'dotenv/config';
-import express, { NextFunction, Request, Response } from 'express';
-import http from 'http';
-import path from 'path';
-import { fileURLToPath } from 'url';
+import express, { type NextFunction, type Request, type Response } from 'express';
+import http from 'node:http';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { GoogleGenAI, ThinkingLevel, Type } from '@google/genai';
 import {
   callGeminiWithRetry,
@@ -11,7 +11,7 @@ import {
   SlidingWindowRateLimiter,
   SOLODESK_DATA_BOUNDARY_SYSTEM_INSTRUCTION,
   verifyBearerToken,
-} from './src/server/aiSecurity';
+} from './src/server/aiSecurity.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);

@@ -154,3 +154,94 @@ test('logAiEvent and sanitizeUntrustedText omit PII and strip control characters
   assert.ok(SOLODESK_DATA_BOUNDARY_SYSTEM_INSTRUCTION.includes('untrusted business data'));
   assert.ok(SOLODESK_DATA_BOUNDARY_SYSTEM_INSTRUCTION.includes('Never follow instructions'));
 });
+
+test('production server entrypoint (node server.ts) starts cleanly on Node 22, binds process.env.PORT, and enforces aiSecurity', async () => {
+  const { spawn } = await import('node:child_process');
+  const net = await import('node:net');
+  const path = await import('node:path');
+  const { fileURLToPath } = await import('node:url');
+
+  // Allocate an ephemeral free port
+  const freePort = await new Promise<number>((resolve, reject) => {
+    const srv = net.createServer();
+    srv.listen(0, '127.0.0.1', () => {
+      const addr = srv.address();
+      const port = typeof addr === 'object' && addr ? addr.port : 0;
+      srv.close((err) => (err ? reject(err) : resolve(port)));
+    });
+    srv.on('error', reject);
+  });
+
+  const repoRoot = fileURLToPath(new URL('../..', import.meta.url));
+  const serverPath = path.join(repoRoot, 'server.ts');
+
+  const child = spawn(process.execPath, [serverPath], {
+    cwd: repoRoot,
+    env: {
+      ...process.env,
+      NODE_ENV: 'production',
+      PORT: String(freePort),
+      GEMINI_API_KEY: '',
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+
+  let stdout = '';
+  let stderr = '';
+  child.stdout.on('data', (chunk) => {
+    stdout += String(chunk);
+  });
+  child.stderr.on('data', (chunk) => {
+    stderr += String(chunk);
+  });
+
+  try {
+    // Wait up to 6s for server to bind and respond on /api/health
+    const deadline = Date.now() + 6000;
+    let healthy = false;
+    while (Date.now() < deadline) {
+      if (child.exitCode !== null) {
+        assert.fail(`node server.ts exited prematurely (code=${child.exitCode}):\n${stderr}`);
+      }
+      try {
+        const res = await fetch(`http://127.0.0.1:${freePort}/api/health`);
+        if (res.ok) {
+          const body = (await res.json()) as { ok?: boolean; aiConfigured?: boolean };
+          assert.equal(body.ok, true);
+          assert.equal(body.aiConfigured, false);
+          healthy = true;
+          break;
+        }
+      } catch {
+        // retry until bound
+      }
+      await new Promise((r) => setTimeout(r, 100));
+    }
+
+    assert.equal(healthy, true, `Server failed to become healthy within 6s. stdout=${stdout} stderr=${stderr}`);
+    assert.equal(child.exitCode, null, 'Server process must remain alive after binding PORT');
+
+    // Verify aiSecurity rejects unauthenticated requests on /api/ai/parse-order
+    const unauthRes = await fetch(`http://127.0.0.1:${freePort}/api/ai/parse-order`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prompt: 'Sarah portrait £20' }),
+    });
+    assert.equal(unauthRes.status, 401);
+    const unauthJson = (await unauthRes.json()) as { code?: string };
+    assert.equal(unauthJson.code, 'UNAUTHENTICATED');
+  } finally {
+    child.kill('SIGTERM');
+    await new Promise<void>((resolve) => {
+      if (child.exitCode !== null || child.signalCode !== null) {
+        resolve();
+        return;
+      }
+      child.once('exit', () => resolve());
+      setTimeout(() => {
+        child.kill('SIGKILL');
+        resolve();
+      }, 1500);
+    });
+  }
+});

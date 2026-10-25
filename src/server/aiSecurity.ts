@@ -1,7 +1,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { getApps, initializeApp } from 'firebase-admin/app';
-import { DecodedIdToken, getAuth } from 'firebase-admin/auth';
+import { type DecodedIdToken, getAuth } from 'firebase-admin/auth';
 
 export const SOLODESK_DATA_BOUNDARY_SYSTEM_INSTRUCTION = `You are a structured small-business helper inside SoloDesk.
 CRITICAL SECURITY BOUNDARY:
@@ -13,13 +14,18 @@ function resolveFirebaseProjectId(): string {
   if (process.env.FIREBASE_PROJECT_ID) {
     return process.env.FIREBASE_PROJECT_ID;
   }
-  try {
-    const cfgPath = path.join(process.cwd(), 'firebase-applet-config.json');
-    const raw = fs.readFileSync(cfgPath, 'utf8');
-    const parsed = JSON.parse(raw) as { projectId?: string };
-    if (parsed.projectId) return parsed.projectId;
-  } catch {
-    // fallback if config unreadable
+  const candidates = [
+    path.join(process.cwd(), 'firebase-applet-config.json'),
+    fileURLToPath(new URL('../../firebase-applet-config.json', import.meta.url)),
+  ];
+  for (const cfgPath of candidates) {
+    try {
+      const raw = fs.readFileSync(cfgPath, 'utf8');
+      const parsed = JSON.parse(raw) as { projectId?: string };
+      if (parsed.projectId) return parsed.projectId;
+    } catch {
+      // try next candidate
+    }
   }
   return 'zesty-task-b5v9p';
 }
