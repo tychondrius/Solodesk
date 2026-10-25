@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   Bell,
   CheckCheck,
@@ -19,6 +19,8 @@ import {
 } from 'lucide-react';
 import { useApp } from '../context/AppContext';
 import { NavSection } from '../types';
+import { sanitizeUserFacingMessage } from '../utils/businessLogic';
+import { useLockBodyScroll } from '../utils/useLockBodyScroll';
 
 const NAV_ITEMS: { id: NavSection; label: string; icon: React.ComponentType<{ className?: string }> }[] = [
   { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
@@ -53,6 +55,27 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
   const [notifOpen, setNotifOpen] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const notifRef = useRef<HTMLDivElement>(null);
+
+  useLockBodyScroll(mobileMenuOpen);
+
+  useEffect(() => {
+    if (!notifOpen) return;
+    const handlePointerDown = (e: PointerEvent) => {
+      if (notifRef.current && !notifRef.current.contains(e.target as Node)) {
+        setNotifOpen(false);
+      }
+    };
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setNotifOpen(false);
+    };
+    document.addEventListener('pointerdown', handlePointerDown);
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('pointerdown', handlePointerDown);
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [notifOpen]);
 
   const currentNav = NAV_ITEMS.find((n) => n.id === activeSection) || NAV_ITEMS[0];
 
@@ -206,7 +229,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             </button>
 
             {/* Notifications Popover */}
-            <div className="relative">
+            <div ref={notifRef} className="relative">
               <button
                 type="button"
                 onClick={() => setNotifOpen((prev) => !prev)}
@@ -223,17 +246,11 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               </button>
 
               {notifOpen && (
-                <>
-                  <div
-                    className="fixed inset-0 z-30"
-                    onClick={() => setNotifOpen(false)}
-                    aria-hidden="true"
-                  />
-                  <div
-                    role="dialog"
-                    aria-label="Notification centre"
-                    className="absolute right-0 z-40 mt-2 w-80 sm:w-96 overflow-hidden rounded-2xl border border-stone-200 bg-white shadow-xl dark:border-zinc-800 dark:bg-zinc-900"
-                  >
+                <div
+                  role="dialog"
+                  aria-label="Notification centre"
+                  className="absolute right-0 z-40 mt-2 w-[min(20rem,calc(100vw-1.5rem))] overflow-hidden rounded-2xl border border-stone-200 bg-white shadow-xl sm:w-96 dark:border-zinc-800 dark:bg-zinc-900"
+                >
                     <div className="flex items-center justify-between border-b border-stone-100 px-4 py-3 dark:border-zinc-800">
                       <span className="text-xs font-semibold text-stone-900 dark:text-zinc-100">
                         Notifications
@@ -289,7 +306,6 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                       )}
                     </div>
                   </div>
-                </>
               )}
             </div>
 
@@ -313,10 +329,10 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         </main>
       </div>
 
-      {/* Mobile Bottom Navigation (Compact 56px height, <15% viewport cap) */}
+      {/* Mobile Bottom Navigation (Compact 56px height + safe-area inset) */}
       <nav
         aria-label="Mobile navigation"
-        className="fixed inset-x-0 bottom-0 z-20 flex h-14 items-center justify-around border-t border-stone-200 bg-white px-2 lg:hidden dark:border-zinc-800 dark:bg-[#121215]"
+        className="fixed inset-x-0 bottom-0 z-20 flex min-h-14 items-center justify-around border-t border-stone-200 bg-white px-2 pt-1 pb-safe lg:hidden dark:border-zinc-800 dark:bg-[#121215]"
       >
         <button
           type="button"
@@ -392,7 +408,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             if (e.target === e.currentTarget) setMobileMenuOpen(false);
           }}
         >
-          <div className="w-full rounded-t-2xl border-t border-stone-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
+          <div className="max-h-[85dvh] w-full overflow-y-auto overscroll-contain rounded-t-2xl border-t border-stone-200 bg-white p-5 pb-safe dark:border-zinc-800 dark:bg-zinc-900">
             <div className="flex items-center justify-between pb-3">
               <p className="text-sm font-semibold text-stone-900 dark:text-zinc-100">
                 {business.name}
@@ -470,7 +486,10 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                   : 'border-stone-800 bg-stone-900 text-white dark:border-zinc-700 dark:bg-zinc-100 dark:text-zinc-900'
               }`}
             >
-              {t.text}
+              {sanitizeUserFacingMessage(
+                t.text,
+                'Something went wrong. Please review and try again.'
+              )}
             </div>
           ))}
         </div>

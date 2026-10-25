@@ -8,6 +8,7 @@ const SUGGESTED_PROMPTS = [
   'Who owes me money?',
   'What orders are due this week?',
   'How much did I make this month?',
+  'What expenses did I have?',
   'What should I work on today?',
   'Which customers are waiting for something?',
   'Show my overdue orders.',

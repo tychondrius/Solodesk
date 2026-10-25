@@ -10,6 +10,7 @@ import {
   formatShortDate,
   isDateInFinanceRange,
 } from '../utils/businessLogic';
+import { useLockBodyScroll } from '../utils/useLockBodyScroll';
 import { ConfirmDialog } from './ConfirmDialog';
 
 export function MoneyView() {
@@ -25,6 +26,7 @@ export function MoneyView() {
 
   const [range, setRange] = useState<FinanceRange>('last_30');
   const [modalOpen, setModalOpen] = useState(false);
+  useLockBodyScroll(modalOpen);
   const [description, setDescription] = useState('');
   const [category, setCategory] = useState<ExpenseCategory>('Materials');
   const [amount, setAmount] = useState('');
@@ -329,7 +331,7 @@ export function MoneyView() {
       {/* Add Expense Modal */}
       {modalOpen && (
         <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4 backdrop-blur-xs"
+          className="fixed inset-0 z-50 flex items-end justify-center bg-black/50 p-0 backdrop-blur-xs sm:items-center sm:p-4"
           role="dialog"
           aria-modal="true"
           aria-labelledby="add-expense-title"
@@ -337,7 +339,7 @@ export function MoneyView() {
             if (e.target === e.currentTarget) setModalOpen(false);
           }}
         >
-          <div className="w-full max-w-md rounded-2xl border border-stone-200 bg-white p-6 shadow-2xl dark:border-zinc-800 dark:bg-zinc-900">
+          <div className="max-h-[92dvh] w-full max-w-md overflow-y-auto overscroll-contain rounded-t-2xl border border-stone-200 bg-white p-4 pb-safe shadow-2xl sm:rounded-2xl sm:p-6 dark:border-zinc-800 dark:bg-zinc-900">
             <div className="flex items-center justify-between">
               <h3
                 id="add-expense-title"

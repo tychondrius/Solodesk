@@ -17,7 +17,10 @@ import {
   calculateOrderBalance,
   formatCurrency,
   formatShortDate,
+  roundMoney,
+  sanitizeUserFacingMessage,
 } from '../utils/businessLogic';
+import { useLockBodyScroll } from '../utils/useLockBodyScroll';
 import { ConfirmDialog } from './ConfirmDialog';
 
 export function OrderDetailDrawer({
@@ -46,6 +49,8 @@ export function OrderDetailDrawer({
     setSelectedCustomerId,
   } = useApp();
 
+  useLockBodyScroll(true);
+
   const [showPayForm, setShowPayForm] = useState(false);
   const [payAmount, setPayAmount] = useState(
     order.remainingBalance > 0 ? String(order.remainingBalance) : ''
@@ -53,6 +58,7 @@ export function OrderDetailDrawer({
   const [payDate, setPayDate] = useState(todayIso);
   const [payMethod, setPayMethod] = useState<PaymentMethod>('Bank transfer');
   const [payNotes, setPayNotes] = useState('');
+  const [payError, setPayError] = useState<string | null>(null);
   const [savingPay, setSavingPay] = useState(false);
 
   const [newTaskTitle, setNewTaskTitle] = useState('');
@@ -63,6 +69,8 @@ export function OrderDetailDrawer({
     () => payments.filter((p) => p.orderId === order.id),
     [payments, order.id]
   );
+
+  const hasPaymentHistory = order.amountPaid > 0 || orderPayments.length > 0;
 
   const orderTasks = useMemo(
     () => tasks.filter((t) => t.orderId === order.id),
@@ -77,8 +85,18 @@ export function OrderDetailDrawer({
 
   const handleRecordPayment = async (e: React.FormEvent) => {
     e.preventDefault();
-    const num = Number(payAmount);
-    if (!Number.isFinite(num) || num <= 0) return;
+    setPayError(null);
+    const num = roundMoney(Number(payAmount));
+    if (!Number.isFinite(num) || num <= 0) {
+      setPayError('Enter a payment amount greater than zero.');
+      return;
+    }
+    const remaining = roundMoney(order.remainingBalance);
+    if (num > remaining + 0.005) {
+      setPayError(`Only ${formatCurrency(remaining, business.currency)} remains on this order.`);
+      return;
+    }
+
     setSavingPay(true);
     try {
       await recordPayment(order.id, {
@@ -89,8 +107,13 @@ export function OrderDetailDrawer({
       });
       setShowPayForm(false);
       setPayNotes('');
-      const nextRem = Math.max(0, order.remainingBalance - num);
+      setPayError(null);
+      const nextRem = Math.max(0, roundMoney(remaining - num));
       setPayAmount(nextRem > 0 ? String(nextRem) : '');
+    } catch (err) {
+      setPayError(
+        sanitizeUserFacingMessage(err, 'Could not record payment right now. Please try again.')
+      );
     } finally {
       setSavingPay(false);
     }
@@ -132,7 +155,7 @@ export function OrderDetailDrawer({
           if (e.target === e.currentTarget) onClose();
         }}
       >
-        <div className="flex h-full w-full max-w-xl flex-col overflow-y-auto border-l border-stone-200 bg-white p-6 shadow-2xl dark:border-zinc-800 dark:bg-zinc-900">
+        <div className="flex h-full w-full max-w-xl flex-col overflow-y-auto overscroll-contain border-l border-stone-200 bg-white p-4 pb-safe shadow-2xl sm:p-6 dark:border-zinc-800 dark:bg-zinc-900">
           {/* Top Bar */}
           <div className="flex items-start justify-between gap-4 border-b border-stone-200 pb-4 dark:border-zinc-800">
             <div>
@@ -292,6 +315,7 @@ export function OrderDetailDrawer({
                   <button
                     type="button"
                     onClick={() => {
+                      setPayError(null);
                       setPayAmount(String(order.remainingBalance));
                       setShowPayForm(true);
                     }}
@@ -302,8 +326,18 @@ export function OrderDetailDrawer({
                 ) : (
                   <form
                     onSubmit={handleRecordPayment}
+                    noValidate
                     className="mt-3 space-y-3 border-t border-stone-200 pt-3 dark:border-zinc-800"
                   >
+                    {payError && (
+                      <div
+                        role="alert"
+                        className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700 dark:border-red-900/50 dark:bg-red-950/30 dark:text-red-300"
+                      >
+                        {payError}
+                      </div>
+                    )}
+
                     <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-3">
                       <div>
                         <label
@@ -317,10 +351,12 @@ export function OrderDetailDrawer({
                           type="number"
                           step="0.01"
                           min="0.01"
-                          max={order.remainingBalance}
                           required
                           value={payAmount}
-                          onChange={(e) => setPayAmount(e.target.value)}
+                          onChange={(e) => {
+                            setPayAmount(e.target.value);
+                            if (payError) setPayError(null);
+                          }}
                           className="mt-1 w-full rounded-lg border border-stone-200 bg-white px-2.5 py-1.5 font-mono text-xs text-stone-900 tabular-nums dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100"
                         />
                       </div>
@@ -374,7 +410,10 @@ export function OrderDetailDrawer({
                     <div className="flex items-center justify-end gap-2">
                       <button
                         type="button"
-                        onClick={() => setShowPayForm(false)}
+                        onClick={() => {
+                          setPayError(null);
+                          setShowPayForm(false);
+                        }}
                         className="rounded-lg px-3 py-1.5 text-xs text-stone-600 hover:bg-stone-100 dark:text-zinc-400"
                       >
                         Cancel
@@ -587,12 +626,36 @@ export function OrderDetailDrawer({
 
       <ConfirmDialog
         open={confirmDelete}
-        title={`Delete ${order.orderNumber}?`}
-        description={`This will permanently remove ${order.customerName}’s order (${order.product}) and its checklist tasks.`}
-        confirmLabel="Delete Order"
+        destructive={!hasPaymentHistory}
+        title={
+          hasPaymentHistory
+            ? order.archived
+              ? 'Paid orders cannot be deleted'
+              : 'Archive order instead of deleting?'
+            : `Delete ${order.orderNumber}?`
+        }
+        description={
+          hasPaymentHistory
+            ? `${order.orderNumber} has ${formatCurrency(order.amountPaid, business.currency)} in recorded payments. Paid orders cannot be permanently deleted so your Money & revenue totals stay accurate.${order.archived ? '' : ' Archive this order to remove it from your active list while keeping payment history intact.'}`
+            : `This will permanently remove ${order.customerName}’s order (${order.product}) and its checklist tasks.`
+        }
+        confirmLabel={
+          hasPaymentHistory
+            ? order.archived
+              ? 'Keep Archived'
+              : 'Archive Order'
+            : 'Delete Order'
+        }
         onCancel={() => setConfirmDelete(false)}
         onConfirm={async () => {
           setConfirmDelete(false);
+          if (hasPaymentHistory) {
+            if (!order.archived && order.status !== 'Cancelled') {
+              await archiveOrder(order.id, true);
+              onClose();
+            }
+            return;
+          }
           await deleteOrder(order.id);
           onClose();
         }}

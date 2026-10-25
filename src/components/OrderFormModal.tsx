@@ -7,8 +7,12 @@ import {
   addDaysIso,
   calculateOrderBalance,
   formatCurrency,
+  formatLongDate,
   isActiveOrderStatus,
+  roundMoney,
+  sanitizeUserFacingMessage,
 } from '../utils/businessLogic';
+import { useLockBodyScroll } from '../utils/useLockBodyScroll';
 
 const DELIVERY_METHODS = [
   'Royal Mail / Post',
@@ -31,12 +35,14 @@ export function OrderFormModal() {
     setSelectedOrderId,
   } = useApp();
 
+  useLockBodyScroll(orderModal.open);
+
   const editing = orderModal.editingOrder;
 
   const [tab, setTab] = useState<'manual' | 'ai'>('manual');
   const [aiPrompt, setAiPrompt] = useState('');
   const [aiLoading, setAiLoading] = useState(false);
-  const [aiWarning, setAiWarning] = useState<string | null>(null);
+  const [aiNotice, setAiNotice] = useState<string | null>(null);
   const [parsedDraft, setParsedDraft] = useState<ParsedOrderDraft | null>(null);
 
   // Form fields
@@ -62,7 +68,7 @@ export function OrderFormModal() {
   useEffect(() => {
     if (!orderModal.open) return;
     setFormError(null);
-    setAiWarning(null);
+    setAiNotice(null);
     setParsedDraft(null);
     setAiPrompt('');
 
@@ -124,7 +130,7 @@ export function OrderFormModal() {
       return;
     }
     setFormError(null);
-    setAiWarning(null);
+    setAiNotice(null);
     setAiLoading(true);
     try {
       const result = await extractOrderWithAi({
@@ -132,10 +138,26 @@ export function OrderFormModal() {
         currency: business.currency,
         todayIso,
       });
-      setParsedDraft(result.draft);
-      if (result.warning) {
-        setAiWarning(result.warning);
+      if (result.draft) {
+        setParsedDraft(result.draft);
+        setAiNotice(result.notice || 'Order details extracted. Please review before saving.');
+      } else {
+        setParsedDraft(null);
+        setFormError(
+          sanitizeUserFacingMessage(
+            result.error,
+            'SoloDesk couldn’t confidently understand this order. Please review the details manually.'
+          )
+        );
       }
+    } catch (err) {
+      setParsedDraft(null);
+      setFormError(
+        sanitizeUserFacingMessage(
+          err,
+          'SoloDesk couldn’t confidently understand this order. Please review the details manually.'
+        )
+      );
     } finally {
       setAiLoading(false);
     }
@@ -144,9 +166,17 @@ export function OrderFormModal() {
   const handleConfirmAiDraft = async () => {
     if (!parsedDraft) return;
     if (!parsedDraft.customerName.trim() || !parsedDraft.product.trim()) {
-      setFormError('Customer name and product are required before saving.');
+      setFormError('Please review and enter both a customer name and product before saving.');
       return;
     }
+    const cleanTotal = roundMoney(Number(parsedDraft.totalPrice) || 0);
+    const cleanPaid = roundMoney(Number(parsedDraft.depositPaid) || 0);
+    if (cleanPaid > cleanTotal + 0.005) {
+      setFormError('Amount paid cannot exceed the total order price.');
+      return;
+    }
+
+    setFormError(null);
     setSaving(true);
     try {
       const created = await saveOrder(
@@ -157,15 +187,15 @@ export function OrderFormModal() {
           description: parsedDraft.extras
             ? `${parsedDraft.description || parsedDraft.product} (Extras: ${parsedDraft.extras})`
             : parsedDraft.description || parsedDraft.product,
-          quantity: parsedDraft.quantity || 1,
-          totalPrice: Number(parsedDraft.totalPrice) || 0,
-          depositRequired: Number(parsedDraft.depositPaid) || 0,
-          amountPaid: Number(parsedDraft.depositPaid) || 0,
+          quantity: Math.max(1, Number(parsedDraft.quantity) || 1),
+          totalPrice: cleanTotal,
+          depositRequired: cleanPaid,
+          amountPaid: cleanPaid,
           orderDate: todayIso,
-          dueDate: parsedDraft.dueDate || addDaysIso(todayIso, 7),
+          dueDate: parsedDraft.dueDate || '',
           deliveryMethod: parsedDraft.deliveryMethod || DELIVERY_METHODS[0],
           trackingNumber: '',
-          status: Number(parsedDraft.depositPaid) > 0 ? 'In Progress' : 'New',
+          status: cleanPaid > 0 ? 'In Progress' : 'New',
           archived: false,
           customerNotes: parsedDraft.customerNotes || aiPrompt.trim(),
           internalNotes: '',
@@ -179,7 +209,9 @@ export function OrderFormModal() {
       setActiveSection('orders');
       setSelectedOrderId(created.id);
     } catch (err) {
-      setFormError(err instanceof Error ? err.message : 'Unable to save order.');
+      setFormError(
+        sanitizeUserFacingMessage(err, 'Unable to save order right now. Please try again.')
+      );
     } finally {
       setSaving(false);
     }
@@ -191,9 +223,14 @@ export function OrderFormModal() {
       setFormError('Please enter both a customer name and a product/service.');
       return;
     }
-    const numericTotal = Number(totalPrice);
-    if (!Number.isFinite(numericTotal) || numericTotal < 0) {
+    const numericTotal = roundMoney(Number(totalPrice));
+    if (!Number.isFinite(numericTotal) || numericTotal < 0 || totalPrice.trim() === '') {
       setFormError('Please enter a valid total price.');
+      return;
+    }
+    const numericPaid = roundMoney(Math.max(0, Number(amountPaid) || 0));
+    if (numericPaid > numericTotal + 0.005) {
+      setFormError('Amount paid cannot exceed the total order price.');
       return;
     }
 
@@ -210,8 +247,8 @@ export function OrderFormModal() {
           description: description.trim(),
           quantity: Math.max(1, Number(quantity) || 1),
           totalPrice: numericTotal,
-          depositRequired: Math.max(0, Number(depositRequired) || 0),
-          amountPaid: Math.max(0, Number(amountPaid) || 0),
+          depositRequired: Math.max(0, roundMoney(Number(depositRequired) || 0)),
+          amountPaid: numericPaid,
           orderDate,
           dueDate,
           deliveryMethod,
@@ -226,7 +263,9 @@ export function OrderFormModal() {
       closeOrderModal();
       setSelectedOrderId(saved.id);
     } catch (err) {
-      setFormError(err instanceof Error ? err.message : 'Unable to save order.');
+      setFormError(
+        sanitizeUserFacingMessage(err, 'Unable to save order right now. Please try again.')
+      );
     } finally {
       setSaving(false);
     }
@@ -234,7 +273,7 @@ export function OrderFormModal() {
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4 backdrop-blur-xs"
+      className="fixed inset-0 z-50 flex items-end justify-center bg-black/50 p-0 backdrop-blur-xs sm:items-center sm:p-4"
       role="dialog"
       aria-modal="true"
       aria-labelledby="order-modal-title"
@@ -242,25 +281,26 @@ export function OrderFormModal() {
         if (e.target === e.currentTarget) closeOrderModal();
       }}
     >
-      <div className="flex max-h-[92vh] w-full max-w-2xl flex-col overflow-hidden rounded-2xl border border-stone-200 bg-white shadow-2xl dark:border-zinc-800 dark:bg-zinc-900">
+      <div className="flex max-h-[94dvh] w-full max-w-2xl flex-col overflow-hidden rounded-t-2xl border border-stone-200 bg-white shadow-2xl sm:max-h-[92vh] sm:rounded-2xl dark:border-zinc-800 dark:bg-zinc-900">
         {/* Header */}
-        <div className="flex items-center justify-between border-b border-stone-200 px-6 py-4 dark:border-zinc-800">
-          <div>
-            <h2
-              id="order-modal-title"
-              className="font-display text-lg font-semibold text-stone-900 dark:text-zinc-100"
-            >
-              {editing ? `Edit Order ${editing.orderNumber}` : 'New Order'}
-            </h2>
-          </div>
+        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-stone-200 px-4 py-3 sm:px-6 sm:py-4 dark:border-zinc-800">
+          <h2
+            id="order-modal-title"
+            className="font-display text-base font-semibold text-stone-900 sm:text-lg dark:text-zinc-100"
+          >
+            {editing ? `Edit Order ${editing.orderNumber}` : 'New Order'}
+          </h2>
 
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-2 sm:gap-3">
             {!editing && (
               <div className="flex items-center gap-1 rounded-lg bg-stone-100 p-1 dark:bg-zinc-800">
                 <button
                   type="button"
-                  onClick={() => setTab('manual')}
-                  className={`rounded-md px-3 py-1 text-xs font-medium transition-colors whitespace-nowrap ${
+                  onClick={() => {
+                    setFormError(null);
+                    setTab('manual');
+                  }}
+                  className={`rounded-md px-2.5 py-1 text-xs font-medium whitespace-nowrap transition-colors sm:px-3 ${
                     tab === 'manual'
                       ? 'bg-white text-stone-900 shadow-xs dark:bg-zinc-900 dark:text-zinc-100'
                       : 'text-stone-600 hover:text-stone-900 dark:text-zinc-400'
@@ -270,14 +310,17 @@ export function OrderFormModal() {
                 </button>
                 <button
                   type="button"
-                  onClick={() => setTab('ai')}
-                  className={`inline-flex items-center gap-1.5 rounded-md px-3 py-1 text-xs font-medium transition-colors whitespace-nowrap ${
+                  onClick={() => {
+                    setFormError(null);
+                    setTab('ai');
+                  }}
+                  className={`inline-flex items-center gap-1 rounded-md px-2.5 py-1 text-xs font-medium whitespace-nowrap transition-colors sm:gap-1.5 sm:px-3 ${
                     tab === 'ai'
                       ? 'bg-white text-stone-900 shadow-xs dark:bg-zinc-900 dark:text-zinc-100'
                       : 'text-stone-600 hover:text-stone-900 dark:text-zinc-400'
                   }`}
                 >
-                  <Sparkles className="h-3.5 w-3.5" aria-hidden="true" />
+                  <Sparkles className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
                   Create with AI
                 </button>
               </div>
@@ -295,9 +338,9 @@ export function OrderFormModal() {
         </div>
 
         {/* Body */}
-        <div className="overflow-y-auto p-6">
+        <div className="overflow-y-auto overscroll-contain p-4 pb-safe sm:p-6">
           {hitFreeLimit && (
-            <div className="mb-5 rounded-xl border border-amber-200 bg-amber-50 p-4 text-xs text-amber-900 dark:border-amber-900/50 dark:bg-amber-950/30 dark:text-amber-200">
+            <div className="mb-4 rounded-xl border border-amber-200 bg-amber-50 p-3.5 text-xs text-amber-900 dark:border-amber-900/50 dark:bg-amber-950/30 dark:text-amber-200">
               <p className="font-semibold">Free plan limit reached (10 active orders)</p>
               <p className="mt-1">
                 Complete or archive an older order, or switch to the Solo plan preview in Settings for unlimited orders.
@@ -325,7 +368,7 @@ export function OrderFormModal() {
           )}
 
           {tab === 'ai' && !editing ? (
-            <div className="space-y-5">
+            <div className="space-y-4">
               <form onSubmit={handleExtractAi}>
                 <label
                   htmlFor="ai-order-prompt"
@@ -338,14 +381,14 @@ export function OrderFormModal() {
                 </p>
                 <textarea
                   id="ai-order-prompt"
-                  rows={4}
+                  rows={parsedDraft ? 3 : 4}
                   value={aiPrompt}
                   onChange={(e) => setAiPrompt(e.target.value)}
                   placeholder="Sarah ordered an A4 couple portrait for £20 plus a pet for £2. She paid £11 deposit and needs it by 14 November."
-                  className="mt-2.5 w-full rounded-xl border border-stone-200 bg-stone-50/70 p-3.5 text-sm text-stone-900 placeholder:text-stone-400 focus:border-stone-500 focus:bg-white focus:outline-none dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100"
+                  className="mt-2 w-full rounded-xl border border-stone-200 bg-stone-50/70 p-3 text-sm text-stone-900 placeholder:text-stone-400 focus:border-stone-500 focus:bg-white focus:outline-none dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100"
                 />
 
-                <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
+                <div className="mt-2.5 flex flex-wrap items-center justify-between gap-2">
                   <button
                     type="button"
                     onClick={() =>
@@ -361,7 +404,7 @@ export function OrderFormModal() {
                   <button
                     type="submit"
                     disabled={aiLoading || hitFreeLimit}
-                    className="inline-flex items-center gap-2 rounded-xl bg-stone-900 px-4 py-2 text-xs font-semibold text-white transition-colors hover:bg-stone-800 disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-200"
+                    className="inline-flex items-center gap-2 rounded-xl bg-stone-900 px-3.5 py-2 text-xs font-semibold text-white transition-colors hover:bg-stone-800 disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-200"
                   >
                     {aiLoading ? (
                       <>
@@ -378,25 +421,26 @@ export function OrderFormModal() {
                 </div>
               </form>
 
-              {aiWarning && (
-                <div className="rounded-xl border border-stone-200 bg-stone-50 p-3 text-xs text-stone-600 dark:border-zinc-800 dark:bg-zinc-950 dark:text-zinc-400">
-                  {aiWarning}
-                </div>
+              {aiNotice && parsedDraft && (
+                <p className="text-xs font-medium text-stone-600 dark:text-zinc-400">
+                  {aiNotice}
+                </p>
               )}
 
               {parsedDraft && (
-                <div className="rounded-2xl border border-stone-200 bg-stone-50/80 p-5 dark:border-zinc-800 dark:bg-zinc-950">
-                  <div className="flex items-center justify-between">
+                <div className="rounded-2xl border border-stone-200 bg-stone-50/80 p-3.5 sm:p-5 dark:border-zinc-800 dark:bg-zinc-950">
+                  {/* Stack cleanly on narrow mobile viewports (320px+), side-by-side on sm+ */}
+                  <div className="flex flex-col gap-0.5 sm:flex-row sm:items-baseline sm:justify-between">
                     <h3 className="text-sm font-semibold text-stone-900 dark:text-zinc-100">
                       I understood:
                     </h3>
-                    <span className="text-xs text-stone-500 dark:text-zinc-400">
+                    <p className="text-xs text-stone-500 dark:text-zinc-400">
                       Review &amp; edit anything before confirming
-                    </span>
+                    </p>
                   </div>
 
-                  <div className="mt-4 grid grid-cols-1 gap-3.5 sm:grid-cols-2">
-                    <div>
+                  <div className="mt-3 grid grid-cols-2 gap-2.5 sm:mt-4 sm:gap-3.5">
+                    <div className="col-span-2 sm:col-span-1">
                       <label
                         htmlFor="ai-draft-customer"
                         className="block text-xs font-medium text-stone-600 dark:text-zinc-400"
@@ -406,15 +450,16 @@ export function OrderFormModal() {
                       <input
                         id="ai-draft-customer"
                         type="text"
+                        placeholder="Customer name"
                         value={parsedDraft.customerName}
                         onChange={(e) =>
                           setParsedDraft({ ...parsedDraft, customerName: e.target.value })
                         }
-                        className="mt-1 w-full rounded-lg border border-stone-200 bg-white px-3 py-2 text-sm text-stone-900 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100"
+                        className="mt-1 w-full rounded-lg border border-stone-200 bg-white px-2.5 py-1.5 text-sm text-stone-900 sm:px-3 sm:py-2 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100"
                       />
                     </div>
 
-                    <div>
+                    <div className="col-span-2 sm:col-span-1">
                       <label
                         htmlFor="ai-draft-product"
                         className="block text-xs font-medium text-stone-600 dark:text-zinc-400"
@@ -424,15 +469,16 @@ export function OrderFormModal() {
                       <input
                         id="ai-draft-product"
                         type="text"
+                        placeholder="Product or service"
                         value={parsedDraft.product}
                         onChange={(e) =>
                           setParsedDraft({ ...parsedDraft, product: e.target.value })
                         }
-                        className="mt-1 w-full rounded-lg border border-stone-200 bg-white px-3 py-2 text-sm text-stone-900 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100"
+                        className="mt-1 w-full rounded-lg border border-stone-200 bg-white px-2.5 py-1.5 text-sm text-stone-900 sm:px-3 sm:py-2 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100"
                       />
                     </div>
 
-                    <div>
+                    <div className="col-span-2 sm:col-span-1">
                       <label
                         htmlFor="ai-draft-extras"
                         className="block text-xs font-medium text-stone-600 dark:text-zinc-400"
@@ -447,29 +493,34 @@ export function OrderFormModal() {
                         onChange={(e) =>
                           setParsedDraft({ ...parsedDraft, extras: e.target.value })
                         }
-                        className="mt-1 w-full rounded-lg border border-stone-200 bg-white px-3 py-2 text-sm text-stone-900 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100"
+                        className="mt-1 w-full rounded-lg border border-stone-200 bg-white px-2.5 py-1.5 text-sm text-stone-900 sm:px-3 sm:py-2 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100"
                       />
                     </div>
 
-                    <div>
+                    <div className="col-span-2 sm:col-span-1">
                       <label
                         htmlFor="ai-draft-due"
-                        className="block text-xs font-medium text-stone-600 dark:text-zinc-400"
+                        className="block truncate text-xs font-medium text-stone-600 dark:text-zinc-400"
                       >
-                        Due ({parsedDraft.dueDateDisplay})
+                        Due ({parsedDraft.dueDateDisplay || 'Not specified'})
                       </label>
                       <input
                         id="ai-draft-due"
                         type="date"
                         value={parsedDraft.dueDate}
-                        onChange={(e) =>
-                          setParsedDraft({ ...parsedDraft, dueDate: e.target.value })
-                        }
-                        className="mt-1 w-full rounded-lg border border-stone-200 bg-white px-3 py-2 text-sm text-stone-900 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100"
+                        onChange={(e) => {
+                          const nextIso = e.target.value;
+                          setParsedDraft({
+                            ...parsedDraft,
+                            dueDate: nextIso,
+                            dueDateDisplay: nextIso ? formatLongDate(nextIso) : 'Not specified',
+                          });
+                        }}
+                        className="mt-1 w-full rounded-lg border border-stone-200 bg-white px-2.5 py-1.5 text-sm text-stone-900 sm:px-3 sm:py-2 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100"
                       />
                     </div>
 
-                    <div>
+                    <div className="col-span-1">
                       <label
                         htmlFor="ai-draft-total"
                         className="block text-xs font-medium text-stone-600 dark:text-zinc-400"
@@ -483,18 +534,18 @@ export function OrderFormModal() {
                         min="0"
                         value={parsedDraft.totalPrice}
                         onChange={(e) => {
-                          const tot = Math.max(0, Number(e.target.value) || 0);
+                          const tot = Math.max(0, roundMoney(Number(e.target.value) || 0));
                           setParsedDraft({
                             ...parsedDraft,
                             totalPrice: tot,
-                            remainingBalance: Math.max(0, tot - parsedDraft.depositPaid),
+                            remainingBalance: Math.max(0, roundMoney(tot - parsedDraft.depositPaid)),
                           });
                         }}
-                        className="mt-1 w-full rounded-lg border border-stone-200 bg-white px-3 py-2 font-mono text-sm text-stone-900 tabular-nums dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100"
+                        className="mt-1 w-full rounded-lg border border-stone-200 bg-white px-2.5 py-1.5 font-mono text-sm text-stone-900 tabular-nums sm:px-3 sm:py-2 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100"
                       />
                     </div>
 
-                    <div>
+                    <div className="col-span-1">
                       <label
                         htmlFor="ai-draft-paid"
                         className="block text-xs font-medium text-stone-600 dark:text-zinc-400"
@@ -508,35 +559,81 @@ export function OrderFormModal() {
                         min="0"
                         value={parsedDraft.depositPaid}
                         onChange={(e) => {
-                          const pd = Math.max(0, Number(e.target.value) || 0);
+                          const pd = Math.max(0, roundMoney(Number(e.target.value) || 0));
                           setParsedDraft({
                             ...parsedDraft,
                             depositPaid: pd,
-                            remainingBalance: Math.max(0, parsedDraft.totalPrice - pd),
+                            remainingBalance: Math.max(0, roundMoney(parsedDraft.totalPrice - pd)),
                           });
                         }}
-                        className="mt-1 w-full rounded-lg border border-stone-200 bg-white px-3 py-2 font-mono text-sm text-stone-900 tabular-nums dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100"
+                        className="mt-1 w-full rounded-lg border border-stone-200 bg-white px-2.5 py-1.5 font-mono text-sm text-stone-900 tabular-nums sm:px-3 sm:py-2 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100"
                       />
+                    </div>
+
+                    <div className="col-span-1">
+                      <label
+                        htmlFor="ai-draft-qty"
+                        className="block text-xs font-medium text-stone-600 dark:text-zinc-400"
+                      >
+                        Quantity
+                      </label>
+                      <input
+                        id="ai-draft-qty"
+                        type="number"
+                        min="1"
+                        value={parsedDraft.quantity}
+                        onChange={(e) =>
+                          setParsedDraft({
+                            ...parsedDraft,
+                            quantity: Math.max(1, Math.round(Number(e.target.value) || 1)),
+                          })
+                        }
+                        className="mt-1 w-full rounded-lg border border-stone-200 bg-white px-2.5 py-1.5 font-mono text-sm text-stone-900 tabular-nums sm:px-3 sm:py-2 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100"
+                      />
+                    </div>
+
+                    <div className="col-span-1">
+                      <label
+                        htmlFor="ai-draft-delivery"
+                        className="block text-xs font-medium text-stone-600 dark:text-zinc-400"
+                      >
+                        Delivery
+                      </label>
+                      <select
+                        id="ai-draft-delivery"
+                        value={parsedDraft.deliveryMethod || DELIVERY_METHODS[0]}
+                        onChange={(e) =>
+                          setParsedDraft({ ...parsedDraft, deliveryMethod: e.target.value })
+                        }
+                        className="mt-1 w-full rounded-lg border border-stone-200 bg-white px-2 py-1.5 text-xs text-stone-900 sm:px-3 sm:py-2 sm:text-sm dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100"
+                      >
+                        {DELIVERY_METHODS.map((dm) => (
+                          <option key={dm} value={dm}>
+                            {dm}
+                          </option>
+                        ))}
+                      </select>
                     </div>
                   </div>
 
-                  <div className="mt-4 flex items-center justify-between border-t border-stone-200 pt-3 text-xs dark:border-zinc-800">
+                  <div className="mt-3.5 flex flex-col gap-3 border-t border-stone-200 pt-3 text-xs sm:mt-4 sm:flex-row sm:items-center sm:justify-between dark:border-zinc-800">
                     <span className="text-stone-600 dark:text-zinc-400">
                       Remaining balance:{' '}
                       <strong className="font-mono text-stone-900 tabular-nums dark:text-zinc-100">
                         {formatCurrency(
-                          Math.max(0, parsedDraft.totalPrice - parsedDraft.depositPaid),
+                          Math.max(0, roundMoney(parsedDraft.totalPrice - parsedDraft.depositPaid)),
                           business.currency
                         )}
                       </strong>
                     </span>
 
-                    <div className="flex items-center gap-2">
+                    <div className="flex flex-col-reverse gap-2 sm:flex-row sm:items-center">
                       <button
                         type="button"
                         onClick={() => {
                           setCustomerName(parsedDraft.customerName);
                           setProduct(parsedDraft.product);
+                          setQuantity(parsedDraft.quantity || 1);
                           setDescription(
                             parsedDraft.extras
                               ? `${parsedDraft.product} (+ ${parsedDraft.extras})`
@@ -545,12 +642,12 @@ export function OrderFormModal() {
                           setTotalPrice(String(parsedDraft.totalPrice));
                           setDepositRequired(String(parsedDraft.depositPaid));
                           setAmountPaid(String(parsedDraft.depositPaid));
-                          setDueDate(parsedDraft.dueDate);
-                          setDeliveryMethod(parsedDraft.deliveryMethod);
-                          setCustomerNotes(parsedDraft.customerNotes);
+                          setDueDate(parsedDraft.dueDate || '');
+                          setDeliveryMethod(parsedDraft.deliveryMethod || DELIVERY_METHODS[0]);
+                          setCustomerNotes(parsedDraft.customerNotes || aiPrompt.trim());
                           setTab('manual');
                         }}
-                        className="rounded-lg border border-stone-200 bg-white px-3 py-2 font-medium text-stone-700 hover:bg-stone-50 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300"
+                        className="w-full rounded-lg border border-stone-200 bg-white px-3 py-2 text-center font-medium text-stone-700 hover:bg-stone-50 sm:w-auto dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300"
                       >
                         Open Full Form
                       </button>
@@ -559,9 +656,9 @@ export function OrderFormModal() {
                         type="button"
                         disabled={saving || hitFreeLimit}
                         onClick={() => void handleConfirmAiDraft()}
-                        className="inline-flex items-center gap-1.5 rounded-lg bg-stone-900 px-4 py-2 font-semibold text-white hover:bg-stone-800 disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900"
+                        className="inline-flex w-full items-center justify-center gap-1.5 rounded-lg bg-stone-900 px-4 py-2 font-semibold text-white hover:bg-stone-800 disabled:opacity-50 sm:w-auto dark:bg-zinc-100 dark:text-zinc-900"
                       >
-                        <Check className="h-3.5 w-3.5" />
+                        <Check className="h-3.5 w-3.5 shrink-0" />
                         {saving ? 'Saving…' : 'Confirm & Save Order'}
                       </button>
                     </div>
@@ -571,7 +668,7 @@ export function OrderFormModal() {
             </div>
           ) : (
             <form onSubmit={handleManualSubmit} className="space-y-4">
-              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+              <div className="grid grid-cols-1 gap-3.5 sm:grid-cols-2 sm:gap-4">
                 <div>
                   <label
                     htmlFor="ord-cust-name"
@@ -661,7 +758,7 @@ export function OrderFormModal() {
                     htmlFor="ord-total"
                     className="block text-xs font-medium text-stone-700 dark:text-zinc-300"
                   >
-                    Total price ({business.currency}) *
+                    Total ({business.currency}) *
                   </label>
                   <input
                     id="ord-total"
@@ -823,7 +920,7 @@ export function OrderFormModal() {
                 </label>
               )}
 
-              <div className="flex items-center justify-between border-t border-stone-200 pt-4 dark:border-zinc-800">
+              <div className="flex flex-col gap-3 border-t border-stone-200 pt-4 sm:flex-row sm:items-center sm:justify-between dark:border-zinc-800">
                 <div className="text-xs text-stone-600 dark:text-zinc-400">
                   Remaining balance:{' '}
                   <strong className="font-mono text-stone-900 tabular-nums dark:text-zinc-100">
@@ -831,7 +928,7 @@ export function OrderFormModal() {
                   </strong>
                 </div>
 
-                <div className="flex items-center gap-2.5">
+                <div className="flex items-center justify-end gap-2.5">
                   <button
                     type="button"
                     onClick={closeOrderModal}

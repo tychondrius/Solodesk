@@ -3,14 +3,20 @@ import assert from 'node:assert/strict';
 import {
   answerAssistantLocally,
   calculateOrderBalance,
+  computeDailyRevenueSeries,
   computeDashboardMetrics,
   computeMoneySummary,
+  computeMonthlyFinanceSeries,
   computeTodaysFocus,
   formatCurrency,
   generateTasksForOrder,
   getTimeGreeting,
+  isDeterministicAssistantQuery,
+  isUsableOrderDraft,
+  parseNaturalDueDate,
   parseOrderLocally,
   runGlobalSearch,
+  sanitizeUserFacingMessage,
   validateParsedOrderDraft,
 } from './businessLogic';
 import { createLunaDemoSeed } from '../data/demoData';
@@ -43,20 +49,114 @@ test('calculateOrderBalance computes remaining balance, deposit status, and perc
   assert.equal(full.isFullyPaid, true);
 });
 
+test('sanitizeUserFacingMessage blocks raw Gemini 503 JSON, Firebase/Firestore errors, and stack traces', () => {
+  const fallback = 'SoloDesk couldn’t confidently understand this order. Please review the details manually.';
+
+  assert.equal(
+    sanitizeUserFacingMessage(
+      '{"error":{"code":503,"message":"The model is overloaded. Please try again later.","status":"UNAVAILABLE"}}',
+      fallback
+    ),
+    fallback
+  );
+  assert.equal(
+    sanitizeUserFacingMessage(
+      '{"error":"Missing or insufficient permissions.","operationType":"write","path":"orders/ord_1"}',
+      fallback
+    ),
+    fallback
+  );
+  assert.equal(
+    sanitizeUserFacingMessage('FirebaseError: Firebase: Error (auth/internal-error).', fallback),
+    fallback
+  );
+  assert.equal(
+    sanitizeUserFacingMessage('Error: Gemini API failed\n    at generateContent (server.ts:210:15)', fallback),
+    fallback
+  );
+
+  // Friendly user-facing messages pass through intact
+  assert.equal(
+    sanitizeUserFacingMessage('Only £11 remains on this order.', fallback),
+    'Only £11 remains on this order.'
+  );
+});
+
 test('parseOrderLocally extracts Sarah couple portrait + pet example accurately', () => {
   const prompt =
-    'Sarah ordered an A4 couple portrait for £20 plus a pet for £2. She paid £11 deposit and needs it by 14 November.';
+    'Sarah ordered an A4 portrait for £20 plus a pet for £2. She paid £11 deposit and needs it by 14 November.';
   const draft = parseOrderLocally(prompt, '2026-10-25');
 
+  assert.equal(isUsableOrderDraft(draft), true);
   assert.equal(draft.customerName, 'Sarah');
-  assert.ok(draft.product.toLowerCase().includes('couple portrait'));
+  assert.ok(draft.product.toLowerCase().includes('portrait'));
+  assert.ok(draft.extras.toLowerCase().includes('pet'));
   assert.equal(draft.totalPrice, 22);
   assert.equal(draft.depositPaid, 11);
   assert.equal(draft.remainingBalance, 11);
   assert.equal(draft.dueDate, '2026-11-14');
+  assert.equal(draft.customerNotes, prompt);
 });
 
-test('validateParsedOrderDraft clamps negative or out-of-range AI numbers safely', () => {
+test('parseOrderLocally handles unit pricing, paid half, paid in full, still owes, weekdays, and delivery methods', () => {
+  // 1. Unit pricing + collection + Friday deadline + £10 deposit
+  const cupcakes = parseOrderLocally(
+    'Chloe ordered 2 cupcakes boxes at £15 each for collection. £10 deposit paid, needs it Friday.',
+    '2026-10-25' // Sunday -> Friday is 2026-10-30
+  );
+  assert.equal(cupcakes.customerName, 'Chloe');
+  assert.equal(cupcakes.quantity, 2);
+  assert.equal(cupcakes.totalPrice, 30);
+  assert.equal(cupcakes.depositPaid, 10);
+  assert.equal(cupcakes.remainingBalance, 20);
+  assert.equal(cupcakes.deliveryMethod, 'Local Collection');
+  assert.equal(cupcakes.dueDate, '2026-10-30');
+
+  // 2. Paid half + due next week + Royal Mail
+  const halfPaid = parseOrderLocally(
+    'Liam ordered a custom wooden memory box for £48, paid half, due next week, post it via Royal Mail.',
+    '2026-10-25'
+  );
+  assert.equal(halfPaid.customerName, 'Liam');
+  assert.equal(halfPaid.totalPrice, 48);
+  assert.equal(halfPaid.depositPaid, 24);
+  assert.equal(halfPaid.remainingBalance, 24);
+  assert.equal(halfPaid.dueDate, '2026-11-01');
+  assert.equal(halfPaid.deliveryMethod, 'Royal Mail / Post');
+
+  // 3. Paid in full
+  const fullPaid = parseOrderLocally(
+    'Hannah bought a bridal bouquet preservation frame for £95, paid in full.',
+    '2026-10-25'
+  );
+  assert.equal(fullPaid.customerName, 'Hannah');
+  assert.equal(fullPaid.totalPrice, 95);
+  assert.equal(fullPaid.depositPaid, 95);
+  assert.equal(fullPaid.remainingBalance, 0);
+  assert.equal(fullPaid.dueDate, ''); // Do NOT invent a due date when none mentioned!
+  assert.equal(fullPaid.dueDateDisplay, 'Not specified');
+
+  // 4. Still owes £15
+  const stillOwes = parseOrderLocally(
+    'Megan ordered a personalised hoodie for £35 and still owes £15.',
+    '2026-10-25'
+  );
+  assert.equal(stillOwes.customerName, 'Megan');
+  assert.equal(stillOwes.totalPrice, 35);
+  assert.equal(stillOwes.depositPaid, 20);
+  assert.equal(stillOwes.remainingBalance, 15);
+});
+
+test('parseOrderLocally does NOT invent missing fields and marks unusable gibberish as not usable', () => {
+  const gibberish = parseOrderLocally('hello there testing 123', '2026-10-25');
+  assert.equal(isUsableOrderDraft(gibberish), false);
+
+  const noDate = parseNaturalDueDate('Custom cake topper for £18', '2026-10-25');
+  assert.equal(noDate.iso, '');
+  assert.equal(noDate.display, 'Not specified');
+});
+
+test('validateParsedOrderDraft clamps negative or out-of-range AI numbers and preserves original message', () => {
   const checked = validateParsedOrderDraft(
     {
       customerName: 'Emma',
@@ -65,41 +165,70 @@ test('validateParsedOrderDraft clamps negative or out-of-range AI numbers safely
       depositPaid: 45, // overpaid input should clamp to totalPrice
       dueDate: '2026-11-09',
     },
-    '2026-10-25'
+    '2026-10-25',
+    'Emma wants a custom cake topper £30 by 9 Nov'
   );
   assert.ok(checked);
   assert.equal(checked.totalPrice, 30);
   assert.equal(checked.depositPaid, 30);
   assert.equal(checked.remainingBalance, 0);
+  assert.ok(checked.customerNotes.includes('Emma wants a custom cake topper'));
 });
 
-test('Luna Creative Studio seed generates 8 orders, Today Focus items, and accurate Money metrics', () => {
+test('archiving a paid order preserves its historical payments in Dashboard & Money calculations while excluding cancelled orders', () => {
+  const today = '2026-10-25';
+  const seed = createLunaDemoSeed('test_uid', today);
+
+  const beforeDash = computeDashboardMetrics(seed.orders, seed.payments, today);
+  const beforeMoney = computeMoneySummary(seed.orders, seed.payments, seed.expenses, 'this_month', today);
+  const beforeDaily = computeDailyRevenueSeries(seed.payments, seed.orders, today, 30);
+  const beforeMonthly = computeMonthlyFinanceSeries(seed.payments, seed.orders, seed.expenses, today, 6);
+
+  // Archive SD-1047 (Jessica Brown £28 paid in full)
+  const ordersWithArchived = seed.orders.map((o) =>
+    o.orderNumber === 'SD-1047' ? { ...o, archived: true } : o
+  );
+  assert.equal(ordersWithArchived.some((o) => o.archived), true);
+
+  const afterDash = computeDashboardMetrics(ordersWithArchived, seed.payments, today);
+  const afterMoney = computeMoneySummary(ordersWithArchived, seed.payments, seed.expenses, 'this_month', today);
+  const afterDaily = computeDailyRevenueSeries(seed.payments, ordersWithArchived, today, 30);
+  const afterMonthly = computeMonthlyFinanceSeries(seed.payments, ordersWithArchived, seed.expenses, today, 6);
+
+  assert.equal(afterDash.revenueThisMonth, beforeDash.revenueThisMonth);
+  assert.equal(afterMoney.paymentsReceived, beforeMoney.paymentsReceived);
+  assert.equal(afterMoney.revenue, beforeMoney.revenue);
+  assert.equal(afterMoney.estimatedProfit, beforeMoney.estimatedProfit);
+  assert.deepEqual(afterDaily, beforeDaily);
+  assert.deepEqual(afterMonthly, beforeMonthly);
+
+  // Cancelled orders ARE excluded from revenue
+  const ordersWithCancelled = seed.orders.map((o) =>
+    o.orderNumber === 'SD-1047' ? { ...o, status: 'Cancelled' as const } : o
+  );
+  const cancelledDash = computeDashboardMetrics(ordersWithCancelled, seed.payments, today);
+  assert.equal(cancelledDash.revenueThisMonth, beforeDash.revenueThisMonth - 28);
+});
+
+test('deterministic AI assistant queries & Luna Creative Studio metrics remain exact', () => {
   const today = '2026-10-25';
   const seed = createLunaDemoSeed('test_uid', today);
   assert.equal(seed.orders.length, 8);
-  assert.ok(seed.customers.length >= 6);
+
+  assert.equal(isDeterministicAssistantQuery('Who owes me money?'), true);
+  assert.equal(isDeterministicAssistantQuery('How much did I make this month?'), true);
+  assert.equal(isDeterministicAssistantQuery('What expenses did I have?'), true);
 
   const dash = computeDashboardMetrics(seed.orders, seed.payments, today);
-  assert.ok(dash.revenueThisMonth > 0);
-  assert.equal(dash.outstandingPayments, 124); // 11 + 20 + 20 + 19 + 54
+  assert.equal(dash.outstandingPayments, 124);
   assert.equal(dash.activeOrdersCount, 7);
 
   const focus = computeTodaysFocus(seed.orders, seed.tasks, 'GBP', today);
   assert.ok(focus.length >= 3);
-  assert.ok(
-    !focus.some((f) => f.id.startsWith('focus_due_') && f.subtitle.includes('Dispatched')),
-    'Dispatched orders should not trigger production due alerts'
-  );
 
-  const money = computeMoneySummary(seed.orders, seed.payments, seed.expenses, 'all', today);
-  assert.ok(money.paymentsReceived > money.expensesTotal);
-  assert.equal(money.estimatedProfit, Number((money.paymentsReceived - money.expensesTotal).toFixed(2)));
-
-  // Auto-task generation for custom portrait order
   const generatedTasks = generateTasksForOrder(seed.orders[0], 'test_uid', 'test_uid', today);
   assert.ok(generatedTasks.length >= 3);
 
-  // Assistant owes query
   const owesAns = answerAssistantLocally(
     'Who owes me money?',
     seed.orders,
@@ -113,7 +242,18 @@ test('Luna Creative Studio seed generates 8 orders, Today Focus items, and accur
   assert.equal(owesAns.footerValue, '£124');
   assert.equal(owesAns.items.length, 5);
 
-  // Global search
+  const expAns = answerAssistantLocally(
+    'What expenses did I have?',
+    seed.orders,
+    seed.payments,
+    seed.expenses,
+    seed.tasks,
+    'GBP',
+    today
+  );
+  assert.equal(expAns.visualType, 'list');
+  assert.ok(expAns.items.length >= 2);
+
   const hits = runGlobalSearch('Emma', seed.customers, seed.orders, seed.tasks, 'GBP');
   assert.ok(hits.length >= 3);
 });

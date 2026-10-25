@@ -33,6 +33,42 @@ export function clampString(value: string | undefined | null, maxLength: number)
   return String(value).trim().slice(0, maxLength);
 }
 
+const TECHNICAL_ERROR_PATTERNS: RegExp[] = [
+  /^\s*[{[]/,
+  /\b(?:500|502|503|504|429|401|403)\b/,
+  /\b(?:UNAVAILABLE|RESOURCE_EXHAUSTED|DEADLINE_EXCEEDED|PERMISSION_DENIED|INTERNAL|UNAUTHENTICATED)\b/i,
+  /\b(?:gemini|genai|googlegenai|firebase|firestore|stack\s*trace|econnrefused|etimedout|fetch\s+failed|networkerror|aborterror|syntaxerror|typeerror)\b/i,
+  /\bauth\/[a-z0-9\-]+\b/i,
+  /\bat\s+[A-Za-z0-9_$.]+\s*\(/,
+  /"error"\s*:/i,
+  /"code"\s*:/i,
+  /"status"\s*:/i,
+];
+
+/**
+ * Ensures raw Gemini, Firebase, JSON, HTTP status, or stack-trace messages
+ * are never displayed to end users.
+ */
+export function sanitizeUserFacingMessage(
+  raw: unknown,
+  fallback: string = 'Something went wrong. Please try again.'
+): string {
+  const text =
+    typeof raw === 'string'
+      ? raw.trim()
+      : raw instanceof Error
+        ? raw.message.trim()
+        : '';
+
+  if (!text || text.length > 260) return fallback;
+  for (const pattern of TECHNICAL_ERROR_PATTERNS) {
+    if (pattern.test(text)) {
+      return fallback;
+    }
+  }
+  return text;
+}
+
 export function roundMoney(amount: number): number {
   if (!Number.isFinite(amount)) return 0;
   return Math.round(amount * 100) / 100;
@@ -280,19 +316,28 @@ export function computeDashboardMetrics(
   const prevDate = new Date(Date.UTC(y, m - 2, 1));
   const prevYm = prevDate.toISOString().slice(0, 7);
 
-  const nonCancelledOrders = orders.filter((o) => o.status !== 'Cancelled' && !o.archived);
+  const cancelledOrderIds = new Set(
+    orders.filter((o) => o.status === 'Cancelled').map((o) => o.id)
+  );
+  const activeUnarchivedOrders = orders.filter(
+    (o) => o.status !== 'Cancelled' && !o.archived
+  );
+  const validHistoricalOrders = orders.filter((o) => o.status !== 'Cancelled');
+  const validPayments = payments.filter((p) => !cancelledOrderIds.has(p.orderId));
+  const orderIdsWithPaymentRecords = new Set(validPayments.map((p) => p.orderId));
 
-  // Revenue this month: sum of payments received this month (or order amountPaid if no payment records)
+  // Revenue this month: sum of recorded payments received in this month (including archived orders),
+  // plus legacy non-cancelled orders that have amountPaid > 0 without payment records.
   let revenueThisMonth = 0;
   let lastMonthRevenue = 0;
 
-  if (payments.length > 0) {
-    for (const p of payments) {
-      if (p.date.startsWith(currentYm)) revenueThisMonth += p.amount;
-      else if (p.date.startsWith(prevYm)) lastMonthRevenue += p.amount;
-    }
-  } else {
-    for (const o of nonCancelledOrders) {
+  for (const p of validPayments) {
+    if (p.date.startsWith(currentYm)) revenueThisMonth += p.amount;
+    else if (p.date.startsWith(prevYm)) lastMonthRevenue += p.amount;
+  }
+
+  for (const o of validHistoricalOrders) {
+    if (!orderIdsWithPaymentRecords.has(o.id) && o.amountPaid > 0) {
       if (o.orderDate.startsWith(currentYm)) revenueThisMonth += o.amountPaid;
       else if (o.orderDate.startsWith(prevYm)) lastMonthRevenue += o.amountPaid;
     }
@@ -302,7 +347,7 @@ export function computeDashboardMetrics(
   let activeOrdersCount = 0;
   let ordersDueSoonCount = 0;
 
-  for (const o of nonCancelledOrders) {
+  for (const o of activeUnarchivedOrders) {
     if (o.remainingBalance > 0) {
       outstandingPayments += o.remainingBalance;
     }
@@ -535,17 +580,26 @@ export function computeDailyRevenueSeries(
     map.set(iso, 0);
   }
 
-  if (payments.length > 0) {
-    for (const p of payments) {
-      if (map.has(p.date)) {
-        map.set(p.date, roundMoney((map.get(p.date) || 0) + p.amount));
-      }
+  const cancelledOrderIds = new Set(
+    orders.filter((o) => o.status === 'Cancelled').map((o) => o.id)
+  );
+  const validPayments = payments.filter((p) => !cancelledOrderIds.has(p.orderId));
+  const orderIdsWithPaymentRecords = new Set(validPayments.map((p) => p.orderId));
+
+  for (const p of validPayments) {
+    if (map.has(p.date)) {
+      map.set(p.date, roundMoney((map.get(p.date) || 0) + p.amount));
     }
-  } else {
-    for (const o of orders) {
-      if (o.status !== 'Cancelled' && map.has(o.orderDate)) {
-        map.set(o.orderDate, roundMoney((map.get(o.orderDate) || 0) + o.amountPaid));
-      }
+  }
+
+  for (const o of orders) {
+    if (
+      o.status !== 'Cancelled' &&
+      !orderIdsWithPaymentRecords.has(o.id) &&
+      o.amountPaid > 0 &&
+      map.has(o.orderDate)
+    ) {
+      map.set(o.orderDate, roundMoney((map.get(o.orderDate) || 0) + o.amountPaid));
     }
   }
 
@@ -582,24 +636,33 @@ export function computeMoneySummary(
   range: FinanceRange,
   todayIso: string
 ): MoneySummary {
-  const validOrders = orders.filter((o) => o.status !== 'Cancelled' && !o.archived);
-  const filteredOrders = validOrders.filter((o) => isDateInFinanceRange(o.orderDate, range, todayIso));
+  const cancelledOrderIds = new Set(
+    orders.filter((o) => o.status === 'Cancelled').map((o) => o.id)
+  );
+  // Historical non-cancelled orders remain in financial totals even after archival
+  const nonCancelledOrders = orders.filter((o) => o.status !== 'Cancelled');
+  const activeOpenOrders = nonCancelledOrders.filter((o) => !o.archived);
+  const filteredOrders = nonCancelledOrders.filter((o) =>
+    isDateInFinanceRange(o.orderDate, range, todayIso)
+  );
 
   const revenue = roundMoney(filteredOrders.reduce((sum, o) => sum + o.totalPrice, 0));
 
-  let paymentsReceived = 0;
-  if (payments.length > 0) {
-    paymentsReceived = roundMoney(
-      payments
-        .filter((p) => isDateInFinanceRange(p.date, range, todayIso))
-        .reduce((sum, p) => sum + p.amount, 0)
-    );
-  } else {
-    paymentsReceived = roundMoney(filteredOrders.reduce((sum, o) => sum + o.amountPaid, 0));
-  }
+  const validPayments = payments.filter((p) => !cancelledOrderIds.has(p.orderId));
+  const orderIdsWithPaymentRecords = new Set(validPayments.map((p) => p.orderId));
+
+  const recordedInPeriod = validPayments
+    .filter((p) => isDateInFinanceRange(p.date, range, todayIso))
+    .reduce((sum, p) => sum + p.amount, 0);
+
+  const unrecordedOrderPaymentsInPeriod = filteredOrders
+    .filter((o) => !orderIdsWithPaymentRecords.has(o.id) && o.amountPaid > 0)
+    .reduce((sum, o) => sum + o.amountPaid, 0);
+
+  const paymentsReceived = roundMoney(recordedInPeriod + unrecordedOrderPaymentsInPeriod);
 
   const outstandingPayments = roundMoney(
-    validOrders.reduce((sum, o) => sum + o.remainingBalance, 0)
+    activeOpenOrders.reduce((sum, o) => sum + o.remainingBalance, 0)
   );
 
   const expensesTotal = roundMoney(
@@ -636,17 +699,30 @@ export function computeMonthlyFinanceSeries(
   const [y, m] = todayIso.slice(0, 7).split('-').map(Number);
   const points: MonthlyBarPoint[] = [];
 
+  const cancelledOrderIds = new Set(
+    orders.filter((o) => o.status === 'Cancelled').map((o) => o.id)
+  );
+  const validPayments = payments.filter((p) => !cancelledOrderIds.has(p.orderId));
+  const orderIdsWithPaymentRecords = new Set(validPayments.map((p) => p.orderId));
+
   for (let i = monthsCount - 1; i >= 0; i--) {
     const dt = new Date(Date.UTC(y, m - 1 - i, 1));
     const key = dt.toISOString().slice(0, 7);
     const label = dt.toLocaleDateString('en-GB', { month: 'short', timeZone: 'UTC' });
 
-    const rev =
-      payments.length > 0
-        ? payments.filter((p) => p.date.startsWith(key)).reduce((s, p) => s + p.amount, 0)
-        : orders
-            .filter((o) => o.status !== 'Cancelled' && o.orderDate.startsWith(key))
-            .reduce((s, o) => s + o.amountPaid, 0);
+    const revFromPayments = validPayments
+      .filter((p) => p.date.startsWith(key))
+      .reduce((s, p) => s + p.amount, 0);
+
+    const revFromLegacyOrders = orders
+      .filter(
+        (o) =>
+          o.status !== 'Cancelled' &&
+          !orderIdsWithPaymentRecords.has(o.id) &&
+          o.amountPaid > 0 &&
+          o.orderDate.startsWith(key)
+      )
+      .reduce((s, o) => s + o.amountPaid, 0);
 
     const exp = expenses
       .filter((e) => e.date.startsWith(key))
@@ -655,7 +731,7 @@ export function computeMonthlyFinanceSeries(
     points.push({
       monthKey: key,
       label,
-      revenue: roundMoney(rev),
+      revenue: roundMoney(revFromPayments + revFromLegacyOrders),
       expenses: roundMoney(exp),
     });
   }
@@ -754,13 +830,55 @@ const MONTH_MAP: Record<string, number> = {
   dec: 12, december: 12,
 };
 
+const WEEKDAY_MAP: Record<string, number> = {
+  sunday: 0, sun: 0,
+  monday: 1, mon: 1,
+  tuesday: 2, tue: 2, tues: 2,
+  wednesday: 3, wed: 3, weds: 3,
+  thursday: 4, thu: 4, thur: 4, thurs: 4,
+  friday: 5, fri: 5,
+  saturday: 6, sat: 6,
+};
+
+const NON_NAME_WORDS = new Set([
+  'order', 'ordered', 'customer', 'client', 'someone', 'need', 'needs', 'want', 'wants',
+  'please', 'two', 'three', 'four', 'five', 'one', 'paid', 'deposit', 'collection',
+  'post', 'royal', 'tracked', 'urgent', 'hello', 'hi', 'hey', 'new', 'custom',
+]);
+
+function titleCaseProduct(raw: string): string {
+  const cleaned = raw
+    .replace(/^[\s,\-:;]+|[\s,\-:;]+$/g, '')
+    .replace(/\b(?:an?|the)\s+/i, (m, offset) => (offset === 0 ? '' : m))
+    .trim();
+  if (!cleaned) return '';
+  return cleaned
+    .split(/\s+/)
+    .map((w) => {
+      if (/^(?:A[345]|3D|UV|LED|UK|XL|XXL)$/i.test(w)) return w.toUpperCase();
+      if (w.length > 2) return w[0].toUpperCase() + w.slice(1);
+      return w;
+    })
+    .join(' ');
+}
+
 export function parseNaturalDueDate(text: string, todayIso: string): { iso: string; display: string } {
   const lower = text.toLowerCase();
-  if (lower.includes('tomorrow')) {
+
+  // Explicit ISO YYYY-MM-DD
+  const isoMatch = text.match(/\b(20\d{2}-\d{2}-\d{2})\b/);
+  if (isoMatch) {
+    return { iso: isoMatch[1], display: formatLongDate(isoMatch[1]) };
+  }
+
+  if (/\bdue\s+today\b|\bneeds?\s+(?:it\s+)?today\b|\bfor\s+today\b/i.test(lower)) {
+    return { iso: todayIso, display: formatLongDate(todayIso) };
+  }
+  if (/\btomorrow\b/i.test(lower)) {
     const iso = addDaysIso(todayIso, 1);
     return { iso, display: formatLongDate(iso) };
   }
-  if (lower.includes('next week')) {
+  if (/\bnext\s+week\b/i.test(lower)) {
     const iso = addDaysIso(todayIso, 7);
     return { iso, display: formatLongDate(iso) };
   }
@@ -775,85 +893,271 @@ export function parseNaturalDueDate(text: string, todayIso: string): { iso: stri
     const day = dmy ? Number(dmy[1]) : Number(mdy![2]);
     const monthStr = (dmy ? dmy[2] : mdy![1]).toLowerCase();
     const month = MONTH_MAP[monthStr] || curM;
-    let year = curY;
-    if (month < curM || (month === curM && day < curD - 2)) {
-      year += 1;
+    if (day >= 1 && day <= 31) {
+      let year = curY;
+      if (month < curM || (month === curM && day < curD - 2)) {
+        year += 1;
+      }
+      const iso = `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+      return { iso, display: formatLongDate(iso) };
     }
-    const iso = `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
-    return { iso, display: formatLongDate(iso) };
   }
 
-  const defaultIso = addDaysIso(todayIso, 7);
-  return { iso: defaultIso, display: formatLongDate(defaultIso) };
+  // Match weekday deadlines: "needs it Friday", "due Monday", "by Saturday", "collection Friday"
+  const weekdayMatch = text.match(
+    /\b(?:by|due|for|on|this|next|needs?(?:\s+it)?(?:\s+(?:by|for|on))?|ready(?:\s+(?:by|for|on))?|collect(?:ion)?(?:\s+on)?)\s+(monday|mon|tuesday|tue|tues|wednesday|wed|weds|thursday|thu|thur|thurs|friday|fri|saturday|sat|sunday|sun)\b/i
+  );
+  if (weekdayMatch) {
+    const targetDow = WEEKDAY_MAP[weekdayMatch[1].toLowerCase()];
+    if (targetDow !== undefined) {
+      const baseDate = new Date(Date.UTC(curY || 2026, (curM || 1) - 1, curD || 1));
+      const currentDow = baseDate.getUTCDay();
+      let delta = (targetDow - currentDow + 7) % 7;
+      if (delta === 0) delta = 7;
+      if (/\bnext\s+(?:monday|mon|tuesday|tue|tues|wednesday|wed|weds|thursday|thu|thur|thurs|friday|fri|saturday|sat|sunday|sun)\b/i.test(text) && delta < 7) {
+        delta += 7;
+      }
+      const iso = addDaysIso(todayIso, delta);
+      return { iso, display: formatLongDate(iso) };
+    }
+  }
+
+  // Do NOT invent a due date when none was mentioned
+  return { iso: '', display: 'Not specified' };
+}
+
+function detectDeliveryMethodLocally(text: string): string {
+  if (/\bcollect(?:ion|ing)?\b|\bpick\s*-?\s*up\b/i.test(text)) {
+    return 'Local Collection';
+  }
+  if (/\blocal\s+delivery\b|\bdrop\s*-?\s*off\b|\bdeliver\s+locally\b/i.test(text)) {
+    return 'Local Delivery';
+  }
+  if (/\bcourier\b|\bdpd\b|\bevri\b|\bdhl\b|\btracked\s+courier\b/i.test(text)) {
+    return 'Tracked Courier';
+  }
+  if (/\broyal\s+mail\b|\bpost(?:\s+it|ed|age)?\b|\bby\s+post\b|\bship(?:ping)?\b/i.test(text)) {
+    return 'Royal Mail / Post';
+  }
+  if (/\bdigital\b|\bby\s+email\b|\bemail\s+file\b|\bpdf\b|\bprintable\b/i.test(text)) {
+    return 'Digital Download';
+  }
+  return '';
+}
+
+export function isUsableOrderDraft(draft: ParsedOrderDraft | null | undefined): boolean {
+  if (!draft) return false;
+  const hasProduct = draft.product.trim().length >= 2;
+  const hasCustomer = draft.customerName.trim().length >= 2;
+  const hasMoney = draft.totalPrice > 0 || draft.depositPaid > 0;
+  return Boolean((hasProduct && (hasCustomer || hasMoney)) || (hasCustomer && hasMoney) || (hasProduct && draft.quantity >= 1 && draft.dueDate !== ''));
 }
 
 export function parseOrderLocally(prompt: string, todayIso: string): ParsedOrderDraft {
   const clean = prompt.trim();
-  // Customer name heuristic: first capitalized name before "ordered", "wants", "booked", "asked"
-  const custMatch = clean.match(/^([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\s+(?:ordered|wants|booked|asked|bought|commissioned)/i);
-  const customerName = custMatch ? custMatch[1].trim() : 'Walk-in Customer';
 
-  // Product heuristic
-  const prodMatch = clean.match(/(?:ordered|wants|booked|commissioned)\s+(?:an?\s+|the\s+)?([^.,£€$]+?)(?:\s+for\s+[£€$\d]|\s+at\s+[£€$\d]|[,.;]|$)/i);
-  const rawProduct = prodMatch ? prodMatch[1].trim() : 'Custom Order';
-  const product = rawProduct
-    .split(/\s+/)
-    .map((w) => (w.length > 2 ? w[0].toUpperCase() + w.slice(1) : w.toUpperCase() === w ? w : w))
-    .join(' ');
+  // 1. Customer name extraction (never invent 'Walk-in Customer' if absent)
+  let customerName = '';
+  const custVerbMatch = clean.match(
+    /(?:^|[.!\n]\s*)([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\s+(?:ordered|wants|booked|asked|bought|commissioned|needs|paid|messaging|messaged)/
+  );
+  const custForMatch = clean.match(
+    /\b(?:order\s+for|customer\s*:|client\s*:|from)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\b/i
+  );
+  const candidateName = (custVerbMatch?.[1] || custForMatch?.[1] || '').trim();
+  if (
+    candidateName &&
+    !NON_NAME_WORDS.has(candidateName.split(/\s+/)[0].toLowerCase())
+  ) {
+    customerName = candidateName;
+  }
 
-  // Extras heuristic: "plus a pet for £2"
-  const extraMatch = clean.match(/\b(?:plus|with|and\s+extra)\s+(?:an?\s+)?([^.,£€$]+?)(?:\s+for\s+[£€$]?\d+(?:\.\d+)?|\s*[,.]|$)/i);
+  // 2. Quantity + unit price ("2 cupcakes boxes at £15 each", "3 x mugs @ £12 each")
+  let quantity = 1;
+  let unitTotal = 0;
+  let textWithoutUnitClause = clean;
+
+  const unitMatch = clean.match(
+    /\b(\d{1,4})\s*(?:x\s*)?([a-zA-Z0-9][a-zA-Z0-9\s\-'()]{1,60}?)\s+(?:at|@|for)\s*(?:[£€$]\s*(\d+(?:\.\d{1,2})?)|(\d+(?:\.\d{1,2})?)\s*(?:lei|gbp|eur|usd))\s*(?:each|per\s+\w+|ea)\b/i
+  );
+  let unitProductRaw = '';
+  if (unitMatch) {
+    quantity = Math.max(1, Math.min(10000, Number(unitMatch[1]) || 1));
+    const unitPrice = Number(unitMatch[3] || unitMatch[4] || 0);
+    unitProductRaw = unitMatch[2].trim();
+    unitTotal = roundMoney(quantity * unitPrice);
+    textWithoutUnitClause = clean.replace(unitMatch[0], ' ');
+  } else {
+    const qtyPrefixMatch = clean.match(
+      /(?:ordered|wants|booked|commissioned|bought|^\s*)\s*(\d{1,4})\s*(?:x\b|\s+(?=[a-zA-Z]{3,}))/i
+    );
+    if (qtyPrefixMatch) {
+      const parsedQty = Number(qtyPrefixMatch[1]);
+      if (parsedQty >= 1 && parsedQty <= 1000) {
+        quantity = parsedQty;
+      }
+    }
+  }
+
+  // 3. Product extraction (never invent 'Custom Order' if absent)
+  let rawProduct = unitProductRaw;
+  if (!rawProduct) {
+    const prodAfterVerb = clean.match(
+      /\b(?:ordered|wants|booked|commissioned|asked\s+for|bought)\s+(?:\d{1,4}\s*(?:x\s*)?)?(?:an?\s+|the\s+)?([^.,;£€$\n]+?)(?:\s+(?:for|at|@)\s+(?:[£€$]|\d)|\s+(?:plus|with|and\s+extra)\b|\s+(?:paid|deposit|still\s+owes|needs\s+it|due|by)\b|[,.;\n]|$)/i
+    );
+    const prodLeading = !prodAfterVerb
+      ? clean.match(
+          /^\s*(?:\d{1,4}\s*(?:x\s*)?)?(?:an?\s+)?([a-zA-Z][a-zA-Z0-9\s\-'()]{2,60}?)(?:\s+(?:for|at|@)\s+(?:[£€$]|\d)|\s+(?:plus|with)\b|[,.;\n])/i
+        )
+      : null;
+
+    const candidateProd = (prodAfterVerb?.[1] || prodLeading?.[1] || '').trim();
+    if (
+      candidateProd &&
+      !/^(?:paid|deposit|owes|still|tomorrow|friday|monday|saturday|sunday|collection|royal\s+mail)$/i.test(
+        candidateProd
+      )
+    ) {
+      rawProduct = candidateProd;
+    }
+  }
+  const product = titleCaseProduct(rawProduct);
+
+  // 4. Extras / add-ons extraction ("plus a pet for £2")
+  const extraMatch = clean.match(
+    /\b(?:plus|with\s+extra|and\s+extra|adding)\s+(?:an?\s+)?([^.,;£€$\n]+?)(?:\s+(?:for|at|@)\s*[£€$]?\s*\d+(?:\.\d{1,2})?(?:\s*(?:lei|gbp|eur|usd))?|\s*(?:[,.;\n]|\b(?:she|he|they|paid|deposit|still|needs|due|by)\b)|$)/i
+  );
   const extras = extraMatch ? extraMatch[1].trim() : '';
 
-  // Prices heuristic: distinguish deposit/paid amounts vs item prices
-  const paidMatch = clean.match(/(?:paid|sent|gave)\s*(?:a\s*)?[£€$]?(\d+(?:\.\d{1,2})?)\s*(?:lei)?(?:\s*deposit)?/i) ||
-    clean.match(/deposit\s*(?:of\s*)?[£€$]?(\d+(?:\.\d{1,2})?)/i);
-  const depositPaid = paidMatch ? roundMoney(Number(paidMatch[1])) : 0;
+  // 5. Payment & balance phrases ("£10 deposit", "paid £11 deposit", "paid half", "paid in full", "still owes £15")
+  const depositBeforeWord =
+    clean.match(/[£€$]\s*(\d+(?:\.\d{1,2})?)\s*deposit\b/i) ||
+    clean.match(/\b(\d+(?:\.\d{1,2})?)\s*(?:lei|gbp|eur|usd)\s*deposit\b/i);
+  const paidVerbAmount =
+    clean.match(
+      /\b(?:paid|sent|gave|left)\s+(?:a\s+)?(?:deposit\s+of\s+)?(?:[£€$]\s*(\d+(?:\.\d{1,2})?)|(\d+(?:\.\d{1,2})?)\s*(?:lei|gbp|eur|usd))(?:\s*deposit)?\b/i
+    ) ||
+    clean.match(
+      /\bdeposit(?:\s+paid|\s+of|:)?\s*(?:[£€$]\s*(\d+(?:\.\d{1,2})?)|(\d+(?:\.\d{1,2})?)\s*(?:lei|gbp|eur|usd))\b/i
+    );
+  const stillOwesMatch = clean.match(
+    /\b(?:still\s+owes?|owes?|remaining(?:\s+balance)?(?:\s+of)?|left\s+to\s+pay)\s*(?:[£€$]\s*(\d+(?:\.\d{1,2})?)|(\d+(?:\.\d{1,2})?)\s*(?:lei|gbp|eur|usd))\b/i
+  );
 
-  // Item amounts before "paid" / "deposit"
-  const beforePaidClause = clean.split(/\b(?:she|he|they)?\s*(?:paid|deposit)\b/i)[0] || clean;
-  const priceMatches = [...beforePaidClause.matchAll(/(?:[£€$]\s*(\d+(?:\.\d{1,2})?)|(\d+(?:\.\d{1,2})?)\s*(?:lei|gbp|eur|usd)|\bfor\s+(\d+(?:\.\d{1,2})?))/gi)];
-  let totalPrice = 0;
+  const explicitDeposit = depositBeforeWord
+    ? roundMoney(Number(depositBeforeWord[1]))
+    : paidVerbAmount
+      ? roundMoney(Number(paidVerbAmount[1] || paidVerbAmount[2]))
+      : null;
+
+  const explicitOwes = stillOwesMatch
+    ? roundMoney(Number(stillOwesMatch[1] || stillOwesMatch[2]))
+    : null;
+
+  const paidInFull = /\bpaid\s+in\s+full\b|\bfully\s+paid\b|\ball\s+paid\b/i.test(clean);
+  const paidHalf = /\bpaid\s+half\b|\b50%\s*(?:deposit|paid)\b|\bhalf\s+paid\b/i.test(clean);
+
+  // Strip deposit / paid / owes clauses BEFORE summing item & extra prices so "£10 deposit" isn't added to total
+  const itemScanText = textWithoutUnitClause
+    .replace(/[£€$]\s*\d+(?:\.\d{1,2})?\s*deposit\b/gi, ' ')
+    .replace(/\b\d+(?:\.\d{1,2})?\s*(?:lei|gbp|eur|usd)\s*deposit\b/gi, ' ')
+    .replace(
+      /\b(?:she|he|they|customer)?\s*(?:paid|sent|gave|left)\s+(?:a\s+)?(?:deposit\s+of\s+)?(?:[£€$]?\s*\d+(?:\.\d{1,2})?)(?:\s*(?:lei|gbp|eur|usd))?(?:\s*deposit)?\b/gi,
+      ' '
+    )
+    .replace(
+      /\bdeposit(?:\s+paid|\s+of|:)?\s*[£€$]?\s*\d+(?:\.\d{1,2})?(?:\s*(?:lei|gbp|eur|usd))?\b/gi,
+      ' '
+    )
+    .replace(
+      /\b(?:still\s+owes?|owes?|remaining(?:\s+balance)?(?:\s+of)?|left\s+to\s+pay)\s*[£€$]?\s*\d+(?:\.\d{1,2})?(?:\s*(?:lei|gbp|eur|usd))?\b/gi,
+      ' '
+    );
+
+  const priceMatches = [
+    ...itemScanText.matchAll(
+      /(?:[£€$]\s*(\d+(?:\.\d{1,2})?)|(\d+(?:\.\d{1,2})?)\s*(?:lei|gbp|eur|usd)|\bfor\s+(\d+(?:\.\d{1,2})?)\b)/gi
+    ),
+  ];
+
+  let summedItems = unitTotal;
   for (const m of priceMatches) {
     const val = Number(m[1] || m[2] || m[3] || 0);
-    if (Number.isFinite(val)) totalPrice += val;
+    if (Number.isFinite(val) && val > 0) {
+      summedItems = roundMoney(summedItems + val);
+    }
   }
-  if (totalPrice === 0 && depositPaid > 0) {
-    totalPrice = depositPaid * 2;
+
+  let totalPrice = summedItems;
+  if (totalPrice === 0 && explicitDeposit !== null && explicitOwes !== null) {
+    totalPrice = roundMoney(explicitDeposit + explicitOwes);
+  } else if (totalPrice === 0 && explicitDeposit !== null && paidHalf) {
+    totalPrice = roundMoney(explicitDeposit * 2);
   }
-  const fullPaidWord = /\bpaid\s+in\s+full\b/i.test(clean);
-  const actualPaid = fullPaidWord ? totalPrice : Math.min(totalPrice, depositPaid);
-  const remainingBalance = Math.max(0, roundMoney(totalPrice - actualPaid));
+
+  let actualPaid = 0;
+  if (paidInFull && totalPrice > 0) {
+    actualPaid = totalPrice;
+  } else if (explicitDeposit !== null) {
+    actualPaid = totalPrice > 0 ? Math.min(totalPrice, explicitDeposit) : explicitDeposit;
+  } else if (paidHalf && totalPrice > 0) {
+    actualPaid = roundMoney(totalPrice / 2);
+  } else if (explicitOwes !== null && totalPrice > 0) {
+    actualPaid = Math.max(0, roundMoney(totalPrice - explicitOwes));
+  }
+
+  const remainingBalance =
+    totalPrice > 0
+      ? Math.max(0, roundMoney(totalPrice - actualPaid))
+      : explicitOwes !== null
+        ? explicitOwes
+        : 0;
 
   const due = parseNaturalDueDate(clean, todayIso);
-  const deliveryMethod = /\bcollect/i.test(clean)
-    ? 'Local Collection'
-    : /\bdigital|email\b/i.test(clean)
-      ? 'Digital Download'
-      : 'Royal Mail / Post';
+  const deliveryMethod = detectDeliveryMethodLocally(clean);
+
+  const suggestedTasks: string[] = [];
+  if (product) {
+    suggestedTasks.push(
+      customerName ? `Create ${product} for ${getFirstName(customerName)}` : `Prepare ${product}`
+    );
+  }
+  if (customerName) {
+    suggestedTasks.push(`Send preview or update to ${getFirstName(customerName)}`);
+  }
+  suggestedTasks.push(
+    deliveryMethod === 'Local Collection'
+      ? 'Prepare order for collection'
+      : deliveryMethod === 'Digital Download'
+        ? 'Send final digital files'
+        : 'Package & dispatch order'
+  );
 
   return {
     customerName: clampString(customerName, 140),
     product: clampString(product, 200),
-    extras: clampString(extras, 120),
-    description: clampString(extras ? `${product} (+ ${extras})` : product, 500),
-    quantity: 1,
+    extras: clampString(extras, 140),
+    description: clampString(
+      product && extras ? `${product} (+ ${extras})` : product || extras,
+      1000
+    ),
+    quantity,
     totalPrice: roundMoney(totalPrice),
     depositPaid: roundMoney(actualPaid),
-    remainingBalance,
+    remainingBalance: roundMoney(remainingBalance),
     dueDate: due.iso,
     dueDateDisplay: due.display,
     deliveryMethod,
-    customerNotes: clampString(clean, 500),
-    suggestedTasks: [
-      `Create ${product}`,
-      `Send preview to ${getFirstName(customerName)}`,
-      deliveryMethod === 'Local Collection' ? 'Prepare for collection' : 'Package & post order',
-    ],
+    customerNotes: clampString(clean, 2000),
+    suggestedTasks: suggestedTasks.slice(0, 4),
   };
 }
 
-export function validateParsedOrderDraft(raw: unknown, todayIso: string): ParsedOrderDraft | null {
+export function validateParsedOrderDraft(
+  raw: unknown,
+  _todayIso: string,
+  originalPrompt?: string
+): ParsedOrderDraft | null {
   if (!raw || typeof raw !== 'object') return null;
   const obj = raw as Record<string, unknown>;
   const customerName = clampString(typeof obj.customerName === 'string' ? obj.customerName : '', 140);
@@ -861,16 +1165,26 @@ export function validateParsedOrderDraft(raw: unknown, todayIso: string): Parsed
   if (!customerName && !product) return null;
 
   const totalPrice = Math.max(0, Math.min(1000000, roundMoney(Number(obj.totalPrice) || 0)));
-  const depositPaid = Math.max(0, Math.min(totalPrice || 1000000, roundMoney(Number(obj.depositPaid) || 0)));
-  const computedRemaining = Math.max(0, roundMoney(totalPrice - depositPaid));
+  const rawPaid = Math.max(0, Math.min(1000000, roundMoney(Number(obj.depositPaid) || 0)));
+  const depositPaid = totalPrice > 0 ? Math.min(totalPrice, rawPaid) : rawPaid;
+  const computedRemaining = totalPrice > 0 ? Math.max(0, roundMoney(totalPrice - depositPaid)) : 0;
 
-  const rawDue = typeof obj.dueDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(obj.dueDate)
-    ? obj.dueDate
-    : addDaysIso(todayIso, 7);
+  const rawDue =
+    typeof obj.dueDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(obj.dueDate.trim())
+      ? obj.dueDate.trim()
+      : '';
+
+  const extractedNotes = clampString(typeof obj.customerNotes === 'string' ? obj.customerNotes : '', 1000);
+  const trimmedOriginal = clampString(originalPrompt, 2000);
+  const preservedNotes = trimmedOriginal
+    ? extractedNotes && !trimmedOriginal.toLowerCase().includes(extractedNotes.toLowerCase())
+      ? clampString(`${extractedNotes}\n\nOriginal message: ${trimmedOriginal}`, 2000)
+      : trimmedOriginal
+    : extractedNotes;
 
   return {
-    customerName: customerName || 'New Customer',
-    product: product || 'Custom Order',
+    customerName,
+    product,
     extras: clampString(typeof obj.extras === 'string' ? obj.extras : '', 140),
     description: clampString(typeof obj.description === 'string' ? obj.description : '', 1000),
     quantity: Math.max(1, Math.min(10000, Math.round(Number(obj.quantity) || 1))),
@@ -879,18 +1193,18 @@ export function validateParsedOrderDraft(raw: unknown, todayIso: string): Parsed
     remainingBalance: computedRemaining,
     dueDate: rawDue,
     dueDateDisplay: clampString(
-      typeof obj.dueDateDisplay === 'string' && obj.dueDateDisplay
-        ? obj.dueDateDisplay
-        : formatLongDate(rawDue),
+      rawDue
+        ? typeof obj.dueDateDisplay === 'string' && obj.dueDateDisplay.trim()
+          ? obj.dueDateDisplay
+          : formatLongDate(rawDue)
+        : 'Not specified',
       60
     ),
     deliveryMethod: clampString(
-      typeof obj.deliveryMethod === 'string' && obj.deliveryMethod
-        ? obj.deliveryMethod
-        : 'Royal Mail / Post',
+      typeof obj.deliveryMethod === 'string' ? obj.deliveryMethod : '',
       60
     ),
-    customerNotes: clampString(typeof obj.customerNotes === 'string' ? obj.customerNotes : '', 1000),
+    customerNotes: preservedNotes,
     suggestedTasks: Array.isArray(obj.suggestedTasks)
       ? obj.suggestedTasks
           .filter((t): t is string => typeof t === 'string' && t.trim().length > 0)
@@ -898,6 +1212,20 @@ export function validateParsedOrderDraft(raw: unknown, todayIso: string): Parsed
           .map((t) => clampString(t, 200))
       : [],
   };
+}
+
+export function isDeterministicAssistantQuery(question: string): boolean {
+  const q = question.toLowerCase().trim();
+  return (
+    /\b(?:owe|owes|unpaid|outstanding|balance)\b/.test(q) ||
+    /\b(?:overdue|late)\b/.test(q) ||
+    /\b(?:due\s+this\s+week|upcoming|deadline|deadlines)\b/.test(q) ||
+    /\b(?:waiting|approval|preview|previews)\b/.test(q) ||
+    /\b(?:most\s+money|best\s+selling|highest[\s-]earning|top\s+product|which\s+product)\b/.test(q) ||
+    /\b(?:expense|expenses|spent|spend|costs)\b/.test(q) ||
+    /\b(?:how\s+much|revenue|profit|make\s+this\s+month|made\s+this\s+month|earnings)\b/.test(q) ||
+    /\b(?:work\s+on\s+today|focus\s+on\s+today|priorities\s+today|do\s+today)\b/.test(q)
+  );
 }
 
 export function answerAssistantLocally(
@@ -1016,9 +1344,36 @@ export function answerAssistantLocally(
     };
   }
 
+  if (q.includes('expense') || q.includes('spent') || q.includes('spend') || q.includes('cost')) {
+    const sortedExp = [...expenses].sort((a, b) => b.date.localeCompare(a.date));
+    const monthExp = sortedExp.filter((e) => e.date.slice(0, 7) === todayIso.slice(0, 7));
+    const targetList = monthExp.length > 0 ? monthExp : sortedExp;
+    const totalExp = roundMoney(targetList.reduce((s, e) => s + e.amount, 0));
+    return {
+      headline:
+        targetList.length === 0
+          ? 'You have not logged any expenses yet.'
+          : `You logged ${formatCurrency(totalExp, currency)} across ${targetList.length} expense${targetList.length === 1 ? '' : 's'}${monthExp.length > 0 ? ' this month' : ''}.`,
+      summary:
+        targetList.length === 0
+          ? 'Log materials, postage, or packaging on the Money page to track estimated profit.'
+          : 'Calculated directly from your recorded workspace expenses.',
+      visualType: 'list',
+      items: targetList.slice(0, 10).map((e) => ({
+        label: e.description,
+        sublabel: `${e.category} · ${formatShortDate(e.date)}`,
+        value: formatCurrency(e.amount, currency),
+      })),
+      footerLabel: monthExp.length > 0 ? 'Expenses this month' : 'Total expenses',
+      footerValue: formatCurrency(totalExp, currency),
+      followUpSuggestions: ['How much did I make this month?', 'Who owes me money?'],
+      source: 'local',
+    };
+  }
+
   if (q.includes('most money') || q.includes('best') || q.includes('highest') || q.includes('product')) {
     const byProd = new Map<string, { revenue: number; count: number }>();
-    for (const o of validOrders) {
+    for (const o of orders.filter((ord) => ord.status !== 'Cancelled')) {
       const prev = byProd.get(o.product) || { revenue: 0, count: 0 };
       byProd.set(o.product, { revenue: roundMoney(prev.revenue + o.totalPrice), count: prev.count + 1 });
     }
@@ -1040,7 +1395,7 @@ export function answerAssistantLocally(
     };
   }
 
-  if (q.includes('how much') || q.includes('make') || q.includes('revenue') || q.includes('profit') || q.includes('month')) {
+  if (q.includes('how much') || q.includes('make') || q.includes('made') || q.includes('revenue') || q.includes('profit') || q.includes('month')) {
     const money = computeMoneySummary(orders, payments, expenses, 'this_month', todayIso);
     return {
       headline: `You have received ${formatCurrency(money.paymentsReceived, currency)} this month (${formatCurrency(money.estimatedProfit, currency)} after expenses).`,
@@ -1052,7 +1407,7 @@ export function answerAssistantLocally(
         { label: 'Estimated profit', sublabel: 'Received minus expenses', value: formatCurrency(money.estimatedProfit, currency) },
         { label: 'Outstanding balance', sublabel: 'To collect', value: formatCurrency(money.outstandingPayments, currency) },
       ],
-      followUpSuggestions: ['Who owes me money?', 'Which product made me the most money?'],
+      followUpSuggestions: ['Who owes me money?', 'What expenses did I have?'],
       source: 'local',
     };
   }

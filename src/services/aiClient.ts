@@ -1,3 +1,4 @@
+import { auth } from '../firebase';
 import {
   AssistantResponse,
   CURRENCIES,
@@ -17,49 +18,122 @@ import {
   draftMessageLocally,
   formatCurrency,
   formatShortDate,
+  isDeterministicAssistantQuery,
+  isUsableOrderDraft,
   parseOrderLocally,
+  sanitizeUserFacingMessage,
   validateParsedOrderDraft,
 } from '../utils/businessLogic';
+
+const TRANSIENT_HTTP_STATUSES = new Set([408, 429, 500, 502, 503, 504]);
+
+function delayMs(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function buildAuthorizedHeaders(): Promise<Record<string, string> | null> {
+  const currentUser = auth.currentUser;
+  if (!currentUser) {
+    return null;
+  }
+  try {
+    const idToken = await currentUser.getIdToken();
+    if (!idToken) return null;
+    return {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${idToken}`,
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function postAiEndpoint(
+  url: string,
+  payload: Record<string, unknown>,
+  timeoutMs = 8500
+): Promise<{ ok: boolean; status: number; data: Record<string, unknown> | null }> {
+  const headers = await buildAuthorizedHeaders();
+  if (!headers) {
+    // Unauthenticated / Interactive Demo Mode: skip server call to avoid 401 console noise
+    return { ok: false, status: 0, data: null };
+  }
+
+  const maxAttempts = 2;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      const response = await fetch(url, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(payload),
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+
+      let parsedBody: Record<string, unknown> | null = null;
+      try {
+        parsedBody = (await response.json()) as Record<string, unknown>;
+      } catch {
+        parsedBody = null;
+      }
+
+      if (response.ok) {
+        return { ok: true, status: response.status, data: parsedBody };
+      }
+
+      if (attempt < maxAttempts && TRANSIENT_HTTP_STATUSES.has(response.status)) {
+        await delayMs(350 * attempt);
+        continue;
+      }
+
+      return { ok: false, status: response.status, data: parsedBody };
+    } catch {
+      if (attempt < maxAttempts) {
+        await delayMs(350 * attempt);
+        continue;
+      }
+      return { ok: false, status: 0, data: null };
+    }
+  }
+
+  return { ok: false, status: 0, data: null };
+}
 
 export async function extractOrderWithAi(params: {
   prompt: string;
   currency: CurrencyCode;
   todayIso: string;
 }): Promise<{
-  draft: ParsedOrderDraft;
+  draft: ParsedOrderDraft | null;
   source: 'gemini' | 'fallback';
-  warning?: string;
+  notice?: string;
+  error?: string;
 }> {
-  try {
-    const response = await fetch('/api/ai/parse-order', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(params),
-      signal: AbortSignal.timeout(5000),
-    });
-    const data = await response.json();
-    if (response.ok && data?.parsed) {
-      const validated = validateParsedOrderDraft(data.parsed, params.todayIso);
-      if (validated) {
-        return { draft: validated, source: 'gemini' };
-      }
+  const res = await postAiEndpoint('/api/ai/parse-order', params, 8500);
+  if (res.ok && res.data?.parsed) {
+    const validated = validateParsedOrderDraft(res.data.parsed, params.todayIso, params.prompt);
+    if (validated && isUsableOrderDraft(validated)) {
+      return {
+        draft: validated,
+        source: 'gemini',
+        notice: 'Order details extracted. Please review before saving.',
+      };
     }
-    const fallback = parseOrderLocally(params.prompt, params.todayIso);
+  }
+
+  const fallback = parseOrderLocally(params.prompt, params.todayIso);
+  if (isUsableOrderDraft(fallback)) {
     return {
       draft: fallback,
       source: 'fallback',
-      warning:
-        data?.error ||
-        'Live AI extraction was unavailable — extracted a draft locally for you to review.',
-    };
-  } catch {
-    const fallback = parseOrderLocally(params.prompt, params.todayIso);
-    return {
-      draft: fallback,
-      source: 'fallback',
-      warning: 'Could not reach the AI service — extracted a draft locally for you to review.',
+      notice: 'Order details extracted. Please review before saving.',
     };
   }
+
+  return {
+    draft: null,
+    source: 'fallback',
+    error: 'SoloDesk couldn’t confidently understand this order. Please review the details manually.',
+  };
 }
 
 export async function askBusinessAssistant(params: {
@@ -73,6 +147,20 @@ export async function askBusinessAssistant(params: {
   expenses: ExpenseRecord[];
   tasks: TaskItem[];
 }): Promise<{ response: AssistantResponse; warning?: string }> {
+  // Deterministic workspace queries always use exact local calculations first
+  if (isDeterministicAssistantQuery(params.question) || !auth.currentUser) {
+    const local = answerAssistantLocally(
+      params.question,
+      params.orders,
+      params.payments,
+      params.expenses,
+      params.tasks,
+      params.currency,
+      params.todayIso
+    );
+    return { response: local };
+  }
+
   const moneyThisMonth = computeMoneySummary(
     params.orders,
     params.payments,
@@ -126,64 +214,47 @@ export async function askBusinessAssistant(params: {
       })),
   };
 
-  try {
-    const res = await fetch('/api/ai/assistant', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        question: params.question,
-        businessContext,
-      }),
-      signal: AbortSignal.timeout(5000),
-    });
-    const payload = await res.json();
-    if (res.ok && payload?.data?.headline) {
-      const d = payload.data;
-      return {
-        response: {
-          headline: String(d.headline),
-          summary: String(d.summary || ''),
-          visualType:
-            d.visualType === 'list' || d.visualType === 'metrics' ? d.visualType : 'none',
-          items: Array.isArray(d.items) ? d.items.slice(0, 12) : [],
-          footerLabel: d.footerLabel ? String(d.footerLabel) : undefined,
-          footerValue: d.footerValue ? String(d.footerValue) : undefined,
-          followUpSuggestions: Array.isArray(d.followUpSuggestions)
-            ? d.followUpSuggestions.slice(0, 3)
-            : [],
-          source: 'gemini',
-        },
-      };
-    }
+  const res = await postAiEndpoint(
+    '/api/ai/assistant',
+    {
+      question: params.question,
+      businessContext,
+    },
+    8500
+  );
 
-    const local = answerAssistantLocally(
-      params.question,
-      params.orders,
-      params.payments,
-      params.expenses,
-      params.tasks,
-      params.currency,
-      params.todayIso
-    );
+  const d = res.data?.data as Record<string, unknown> | undefined;
+  if (res.ok && d && typeof d.headline === 'string' && d.headline.trim()) {
     return {
-      response: local,
-      warning: payload?.error,
-    };
-  } catch {
-    const local = answerAssistantLocally(
-      params.question,
-      params.orders,
-      params.payments,
-      params.expenses,
-      params.tasks,
-      params.currency,
-      params.todayIso
-    );
-    return {
-      response: local,
-      warning: 'Answered directly from your workspace records while AI connection was offline.',
+      response: {
+        headline: String(d.headline),
+        summary: String(d.summary || ''),
+        visualType:
+          d.visualType === 'list' || d.visualType === 'metrics' ? d.visualType : 'none',
+        items: Array.isArray(d.items) ? (d.items.slice(0, 12) as AssistantResponse['items']) : [],
+        footerLabel: d.footerLabel ? String(d.footerLabel) : undefined,
+        footerValue: d.footerValue ? String(d.footerValue) : undefined,
+        followUpSuggestions: Array.isArray(d.followUpSuggestions)
+          ? d.followUpSuggestions.slice(0, 3).map(String)
+          : [],
+        source: 'gemini',
+      },
     };
   }
+
+  const local = answerAssistantLocally(
+    params.question,
+    params.orders,
+    params.payments,
+    params.expenses,
+    params.tasks,
+    params.currency,
+    params.todayIso
+  );
+
+  return {
+    response: local,
+  };
 }
 
 export async function generateCustomerMessage(params: {
@@ -193,7 +264,12 @@ export async function generateCustomerMessage(params: {
   businessName: string;
   currency: CurrencyCode;
   order?: Order | null;
-}): Promise<{ subjectLine: string; message: string; source: 'gemini' | 'fallback'; warning?: string }> {
+}): Promise<{
+  subjectLine: string;
+  message: string;
+  source: 'gemini' | 'fallback';
+  warning?: string;
+}> {
   const orderSummary = params.order
     ? {
         orderNumber: params.order.orderNumber,
@@ -206,57 +282,51 @@ export async function generateCustomerMessage(params: {
       }
     : undefined;
 
-  try {
-    const res = await fetch('/api/ai/write-message', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        preset: params.preset,
-        customPrompt: params.customPrompt || '',
-        customerName: params.customerName,
-        businessName: params.businessName,
-        orderSummary,
-      }),
-      signal: AbortSignal.timeout(5000),
-    });
-    const data = await res.json();
-    if (res.ok && data?.message) {
-      return {
-        subjectLine: String(data.subjectLine || ''),
-        message: String(data.message),
-        source: 'gemini',
-      };
-    }
-    const local = draftMessageLocally({
+  const res = await postAiEndpoint(
+    '/api/ai/write-message',
+    {
       preset: params.preset,
+      customPrompt: params.customPrompt || '',
       customerName: params.customerName,
       businessName: params.businessName,
-      product: params.order?.product,
-      remainingFormatted: params.order
-        ? formatCurrency(params.order.remainingBalance, params.currency)
-        : undefined,
-      dueDateFormatted: params.order ? formatShortDate(params.order.dueDate) : undefined,
-      customPrompt: params.customPrompt,
-    });
-    return { ...local, source: 'fallback', warning: data?.error };
-  } catch {
-    const local = draftMessageLocally({
-      preset: params.preset,
-      customerName: params.customerName,
-      businessName: params.businessName,
-      product: params.order?.product,
-      remainingFormatted: params.order
-        ? formatCurrency(params.order.remainingBalance, params.currency)
-        : undefined,
-      dueDateFormatted: params.order ? formatShortDate(params.order.dueDate) : undefined,
-      customPrompt: params.customPrompt,
-    });
+      orderSummary,
+    },
+    8500
+  );
+
+  if (res.ok && typeof res.data?.message === 'string' && res.data.message.trim()) {
     return {
-      ...local,
-      source: 'fallback',
-      warning: 'Generated a friendly editable draft locally while AI service was offline.',
+      subjectLine: String(res.data.subjectLine || ''),
+      message: String(res.data.message),
+      source: 'gemini',
     };
   }
+
+  const local = draftMessageLocally({
+    preset: params.preset,
+    customerName: params.customerName,
+    businessName: params.businessName,
+    product: params.order?.product,
+    remainingFormatted: params.order
+      ? formatCurrency(params.order.remainingBalance, params.currency)
+      : undefined,
+    dueDateFormatted: params.order ? formatShortDate(params.order.dueDate) : undefined,
+    customPrompt: params.customPrompt,
+  });
+
+  const safeNotice =
+    res.status === 429
+      ? sanitizeUserFacingMessage(
+          res.data?.error,
+          'Drafted locally so you can edit and send right away.'
+        )
+      : undefined;
+
+  return {
+    ...local,
+    source: 'fallback',
+    warning: safeNotice,
+  };
 }
 
 export async function fetchAiBusinessInsights(params: {
@@ -267,6 +337,10 @@ export async function fetchAiBusinessInsights(params: {
   payments: PaymentRecord[];
   expenses: ExpenseRecord[];
 }): Promise<SmartInsight[] | null> {
+  if (!auth.currentUser) {
+    return null;
+  }
+
   const summary = computeMoneySummary(
     params.orders,
     params.payments,
@@ -274,44 +348,42 @@ export async function fetchAiBusinessInsights(params: {
     'this_month',
     params.todayIso
   );
-  try {
-    const res = await fetch('/api/ai/insights', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        businessContext: {
-          businessName: params.businessName,
-          currency: params.currency,
-          todayIso: params.todayIso,
-          summary,
-          orders: params.orders.slice(0, 15).map((o) => ({
-            product: o.product,
-            totalPrice: o.totalPrice,
-            remainingBalance: o.remainingBalance,
-            orderDate: o.orderDate,
-            status: o.status,
-          })),
-        },
-      }),
-      signal: AbortSignal.timeout(15000),
-    });
-    const data = await res.json();
-    if (res.ok && Array.isArray(data?.insights) && data.insights.length > 0) {
-      return data.insights.slice(0, 3).map((item: Record<string, unknown>, idx: number) => ({
-        id: `ai_insight_${idx}`,
-        title: String(item.title || ''),
-        detail: String(item.detail || ''),
-        category:
-          item.category === 'revenue' ||
-          item.category === 'product' ||
-          item.category === 'payments' ||
-          item.category === 'schedule'
-            ? item.category
-            : 'revenue',
-      }));
-    }
-    return null;
-  } catch {
-    return null;
+
+  const res = await postAiEndpoint(
+    '/api/ai/insights',
+    {
+      businessContext: {
+        businessName: params.businessName,
+        currency: params.currency,
+        todayIso: params.todayIso,
+        summary,
+        orders: params.orders.slice(0, 15).map((o) => ({
+          product: o.product,
+          totalPrice: o.totalPrice,
+          remainingBalance: o.remainingBalance,
+          orderDate: o.orderDate,
+          status: o.status,
+        })),
+      },
+    },
+    10000
+  );
+
+  const insightsRaw = res.data?.insights;
+  if (res.ok && Array.isArray(insightsRaw) && insightsRaw.length > 0) {
+    return insightsRaw.slice(0, 3).map((item: Record<string, unknown>, idx: number) => ({
+      id: `ai_insight_${idx}`,
+      title: String(item.title || ''),
+      detail: String(item.detail || ''),
+      category:
+        item.category === 'revenue' ||
+        item.category === 'product' ||
+        item.category === 'payments' ||
+        item.category === 'schedule'
+          ? item.category
+          : 'revenue',
+    }));
   }
+
+  return null;
 }

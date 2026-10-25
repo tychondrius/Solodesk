@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { CheckSquare, Package, Search, User, X } from 'lucide-react';
 import { useApp } from '../context/AppContext';
 import { runGlobalSearch, SearchHit } from '../utils/businessLogic';
+import { useLockBodyScroll } from '../utils/useLockBodyScroll';
 
 export function GlobalSearchModal() {
   const {
@@ -15,6 +16,8 @@ export function GlobalSearchModal() {
     setSelectedOrderId,
     setSelectedCustomerId,
   } = useApp();
+
+  useLockBodyScroll(searchOpen);
 
   const [query, setQuery] = useState('');
   const inputRef = useRef<HTMLInputElement>(null);

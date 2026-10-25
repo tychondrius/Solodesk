@@ -10,6 +10,7 @@ import { ArrowLeft, ArrowRight, CheckCircle2, Mail, Sparkles } from 'lucide-reac
 import { auth, googleProvider } from '../firebase';
 import { useApp } from '../context/AppContext';
 import { CURRENCIES, CurrencyCode } from '../types';
+import { sanitizeUserFacingMessage } from '../utils/businessLogic';
 
 const BUSINESS_TYPES = [
   'Illustrator / Portrait Artist',
@@ -21,6 +22,26 @@ const BUSINESS_TYPES = [
   'Freelancer / Sole Trader',
   'Home Business / Other',
 ];
+
+function friendlyAuthError(err: unknown, fallback: string): string {
+  const code = (err as { code?: string })?.code || '';
+  if (code === 'auth/invalid-email') {
+    return 'Please enter a valid email address.';
+  }
+  if (code === 'auth/user-disabled') {
+    return 'This account has been disabled. Please contact support.';
+  }
+  if (code === 'auth/too-many-requests') {
+    return 'Too many attempts right now. Please wait a minute and try again.';
+  }
+  if (code === 'auth/network-request-failed') {
+    return 'Network connection interrupted. Please check your internet and try again.';
+  }
+  if (code === 'auth/popup-blocked') {
+    return 'Your browser blocked the sign-in window. Please allow popups for SoloDesk and try again.';
+  }
+  return sanitizeUserFacingMessage(err, fallback);
+}
 
 export function AuthScreen() {
   const { authModeInitial, backToLanding, enterDemoMode, showToast } = useApp();
@@ -40,9 +61,7 @@ export function AuthScreen() {
     } catch (err: unknown) {
       const code = (err as { code?: string })?.code || '';
       if (code !== 'auth/popup-closed-by-user') {
-        setErrorMsg(
-          err instanceof Error ? err.message : 'Unable to sign in with Google right now.'
-        );
+        setErrorMsg(friendlyAuthError(err, 'Unable to sign in with Google right now.'));
       }
     } finally {
       setBusy(false);
@@ -71,7 +90,7 @@ export function AuthScreen() {
         if (code === 'auth/operation-not-allowed') {
           setProviderNotice(true);
         } else {
-          setErrorMsg(err instanceof Error ? err.message : 'Could not send reset email.');
+          setErrorMsg(friendlyAuthError(err, 'Could not send reset email right now.'));
         }
       } finally {
         setBusy(false);
@@ -96,12 +115,16 @@ export function AuthScreen() {
       const code = (err as { code?: string })?.code || '';
       if (code === 'auth/operation-not-allowed') {
         setProviderNotice(true);
-      } else if (code === 'auth/invalid-credential' || code === 'auth/wrong-password') {
+      } else if (
+        code === 'auth/invalid-credential' ||
+        code === 'auth/wrong-password' ||
+        code === 'auth/user-not-found'
+      ) {
         setErrorMsg('Incorrect email or password. Please check and try again.');
       } else if (code === 'auth/email-already-in-use') {
         setErrorMsg('An account with this email already exists. Try logging in instead.');
       } else {
-        setErrorMsg(err instanceof Error ? err.message : 'Authentication failed.');
+        setErrorMsg(friendlyAuthError(err, 'Unable to sign in right now. Please try again.'));
       }
     } finally {
       setBusy(false);
@@ -393,7 +416,9 @@ export function OnboardingWizard() {
         loadSampleData,
       });
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Unable to save setup right now.');
+      setError(
+        sanitizeUserFacingMessage(err, 'Unable to save setup right now. Please try again.')
+      );
     } finally {
       setSaving(false);
     }

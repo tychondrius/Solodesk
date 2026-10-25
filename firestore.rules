@@ -148,8 +148,10 @@ service cloud.firestore {
         data.totalPrice is number && data.totalPrice >= 0 && data.totalPrice <= 1000000 &&
         data.depositRequired is number && data.depositRequired >= 0 && data.depositRequired <= data.totalPrice &&
         data.depositPaid is bool &&
-        data.amountPaid is number && data.amountPaid >= 0 && data.amountPaid <= 1000000 &&
-        data.remainingBalance is number && data.remainingBalance >= 0 && data.remainingBalance <= 1000000 &&
+        data.amountPaid is number && data.amountPaid >= 0 && data.amountPaid <= data.totalPrice &&
+        data.remainingBalance is number && data.remainingBalance >= 0 && data.remainingBalance <= data.totalPrice &&
+        ((data.totalPrice - data.amountPaid) - data.remainingBalance) < 0.01 &&
+        (data.remainingBalance - (data.totalPrice - data.amountPaid)) < 0.01 &&
         data.orderDate is string && data.orderDate.size() >= 1 && data.orderDate.size() <= 32 &&
         data.dueDate is string && data.dueDate.size() <= 32 &&
         data.deliveryMethod is string && data.deliveryMethod.size() <= 60 &&
@@ -364,7 +366,7 @@ service cloud.firestore {
         incoming().createdAt == request.time &&
         incoming().updatedAt == request.time &&
         businessOwnedByCaller(incoming().businessId) &&
-        get(/databases/$(database)/documents/customers/$(incoming().customerId)).data.ownerId == request.auth.uid;
+        getAfter(/databases/$(database)/documents/customers/$(incoming().customerId)).data.ownerId == request.auth.uid;
       allow update: if isVerifiedUser() &&
         isValidId(orderId) &&
         isValidOrder(incoming(), orderId) &&
@@ -387,7 +389,10 @@ service cloud.firestore {
             'archived', 'customerNotes', 'internalNotes', 'updatedAt'
           ])
         );
-      allow delete: if isVerifiedUser() && isValidId(orderId) && existing().ownerId == request.auth.uid;
+      allow delete: if isVerifiedUser() &&
+        isValidId(orderId) &&
+        existing().ownerId == request.auth.uid &&
+        existing().amountPaid == 0;
     }
 
     // 5. Payments Collection
@@ -400,7 +405,8 @@ service cloud.firestore {
         incoming().createdAt == request.time &&
         incoming().updatedAt == request.time &&
         businessOwnedByCaller(incoming().businessId) &&
-        get(/databases/$(database)/documents/orders/$(incoming().orderId)).data.ownerId == request.auth.uid;
+        getAfter(/databases/$(database)/documents/orders/$(incoming().orderId)).data.ownerId == request.auth.uid &&
+        getAfter(/databases/$(database)/documents/orders/$(incoming().orderId)).data.status != 'Cancelled';
       allow update: if isVerifiedUser() &&
         isValidId(paymentId) &&
         isValidPayment(incoming(), paymentId) &&
@@ -414,7 +420,7 @@ service cloud.firestore {
         incoming().updatedAt == request.time && (
           incoming().diff(existing()).affectedKeys().hasOnly(['amount', 'date', 'method', 'notes', 'updatedAt'])
         );
-      allow delete: if isVerifiedUser() && isValidId(paymentId) && existing().ownerId == request.auth.uid;
+      allow delete: if false;
     }
 
     // 6. Expenses Collection

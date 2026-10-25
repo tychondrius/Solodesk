@@ -15,6 +15,7 @@ import {
   formatCurrency,
   formatShortDate,
 } from '../utils/businessLogic';
+import { useLockBodyScroll } from '../utils/useLockBodyScroll';
 import { statusTextClass } from './DashboardView';
 import { ConfirmDialog } from './ConfirmDialog';
 
@@ -96,6 +97,8 @@ export function CustomersView() {
     () => customers.find((c) => c.id === selectedCustomerId) || null,
     [customers, selectedCustomerId]
   );
+
+  useLockBodyScroll(Boolean(activeCustomer) || formOpen);
 
   const activeStats = useMemo(
     () => (activeCustomer ? computeCustomerStats(activeCustomer.id, orders) : null),
@@ -230,7 +233,7 @@ export function CustomersView() {
             if (e.target === e.currentTarget) setSelectedCustomerId(null);
           }}
         >
-          <div className="flex h-full w-full max-w-lg flex-col overflow-y-auto border-l border-stone-200 bg-white p-6 shadow-2xl dark:border-zinc-800 dark:bg-zinc-900">
+          <div className="flex h-full w-full max-w-lg flex-col overflow-y-auto overscroll-contain border-l border-stone-200 bg-white p-4 pb-safe shadow-2xl sm:p-6 dark:border-zinc-800 dark:bg-zinc-900">
             <div className="flex items-start justify-between gap-4 border-b border-stone-200 pb-4 dark:border-zinc-800">
               <div>
                 <h3
@@ -411,7 +414,7 @@ export function CustomersView() {
       {/* Add / Edit Customer Modal */}
       {formOpen && (
         <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4 backdrop-blur-xs"
+          className="fixed inset-0 z-50 flex items-end justify-center bg-black/50 p-0 backdrop-blur-xs sm:items-center sm:p-4"
           role="dialog"
           aria-modal="true"
           aria-labelledby="cust-form-title"
@@ -419,7 +422,7 @@ export function CustomersView() {
             if (e.target === e.currentTarget) setFormOpen(false);
           }}
         >
-          <div className="w-full max-w-lg rounded-2xl border border-stone-200 bg-white p-6 shadow-2xl dark:border-zinc-800 dark:bg-zinc-900">
+          <div className="max-h-[92dvh] w-full max-w-lg overflow-y-auto overscroll-contain rounded-t-2xl border border-stone-200 bg-white p-4 pb-safe shadow-2xl sm:rounded-2xl sm:p-6 dark:border-zinc-800 dark:bg-zinc-900">
             <div className="flex items-center justify-between">
               <h3
                 id="cust-form-title"

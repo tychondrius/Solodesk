@@ -22,6 +22,7 @@ import {
   calculateOrderBalance,
   clampString,
   createEntityId,
+  formatCurrency,
   generateTasksForOrder,
   getTodayIso,
   roundMoney,
@@ -30,6 +31,7 @@ import { createLunaDemoSeed, WorkspaceSeed } from '../data/demoData';
 import {
   createExpenseFirestore,
   createOnboardingWorkspace,
+  createOrderAtomicFirestore,
   createPaymentFirestore,
   deleteCustomerFirestore,
   deleteExpenseFirestore,
@@ -37,6 +39,7 @@ import {
   deleteTaskFirestore,
   fetchUserAndBusiness,
   markNotificationReadFirestore,
+  recordPaymentAtomicFirestore,
   saveCustomerFirestore,
   saveOrderFirestore,
   saveTaskFirestore,
@@ -720,9 +723,24 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       const ownerId = business.ownerId;
       const businessId = business.id;
 
-      // Ensure customer exists or create new customer automatically
+      const trimmedCustName = clampString(draft.customerName, 140);
+      const trimmedProduct = clampString(draft.product, 200);
+      if (!trimmedCustName || !trimmedProduct) {
+        throw new Error('Please enter both a customer name and product or service.');
+      }
+
+      const rawTotal = roundMoney(draft.totalPrice);
+      const rawPaid = roundMoney(draft.amountPaid);
+      if (rawTotal < 0 || rawPaid < 0) {
+        throw new Error('Order amounts cannot be negative.');
+      }
+      if (rawPaid > rawTotal + 0.005) {
+        throw new Error('Amount paid cannot exceed the total order price.');
+      }
+
+      // Ensure customer exists or create new customer atomically
       let customerId = draft.customerId;
-      const trimmedCustName = clampString(draft.customerName, 140) || 'Walk-in Customer';
+      let newCustomerObj: Customer | null = null;
       const existingCust = customers.find(
         (c) =>
           (customerId && c.id === customerId) ||
@@ -731,6 +749,21 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
       if (existingCust) {
         customerId = existingCust.id;
+      } else if (isNew) {
+        customerId = createEntityId('cust');
+        newCustomerObj = {
+          id: customerId,
+          ownerId,
+          businessId,
+          name: trimmedCustName,
+          email: '',
+          phone: '',
+          instagram: '',
+          facebook: '',
+          address: '',
+          notes: 'Created automatically from order.',
+          lastInteractionAt: todayIso,
+        };
       } else {
         const createdCust = await saveCustomer({
           name: trimmedCustName,
@@ -758,7 +791,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         businessId,
         customerId,
         customerName: trimmedCustName,
-        product: clampString(draft.product, 200) || 'Custom Order',
+        product: trimmedProduct,
         description: clampString(draft.description, 2000),
         quantity: Math.max(1, Math.round(draft.quantity || 1)),
         totalPrice: bal.totalPrice,
@@ -776,42 +809,28 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         internalNotes: clampString(draft.internalNotes, 2000),
       };
 
-      if (isDemoMode) {
-        setOrders((prev) =>
-          isNew ? [orderObj, ...prev] : prev.map((o) => (o.id === orderObj.id ? orderObj : o))
-        );
-      } else {
-        await saveOrderFirestore(orderObj, isNew);
-      }
+      const initialPay: PaymentRecord | null =
+        isNew && orderObj.amountPaid > 0
+          ? {
+              id: createEntityId('pay'),
+              ownerId,
+              businessId,
+              orderId: orderObj.id,
+              customerId: orderObj.customerId,
+              customerName: orderObj.customerName,
+              amount: orderObj.amountPaid,
+              date: orderObj.orderDate,
+              method: 'Bank transfer',
+              notes:
+                orderObj.remainingBalance === 0
+                  ? 'Paid in full on order creation'
+                  : 'Initial deposit paid',
+            }
+          : null;
 
-      // If new order has initial deposit/payment, record it in payment history
-      if (isNew && orderObj.amountPaid > 0) {
-        const initialPay: PaymentRecord = {
-          id: createEntityId('pay'),
-          ownerId,
-          businessId,
-          orderId: orderObj.id,
-          customerId: orderObj.customerId,
-          customerName: orderObj.customerName,
-          amount: orderObj.amountPaid,
-          date: orderObj.orderDate,
-          method: 'Bank transfer',
-          notes:
-            orderObj.remainingBalance === 0
-              ? 'Paid in full on order creation'
-              : 'Initial deposit paid',
-        };
-        if (isDemoMode) {
-          setPayments((prev) => [initialPay, ...prev]);
-        } else {
-          await createPaymentFirestore(initialPay);
-        }
-      }
-
-      // Auto-generate practical workflow tasks for new orders
-      if (isNew && options?.autoCreateTasks !== false) {
-        const generated =
-          options?.customTasks && options.customTasks.length > 0
+      const generatedTasks: TaskItem[] =
+        isNew && options?.autoCreateTasks !== false
+          ? options?.customTasks && options.customTasks.length > 0
             ? options.customTasks.map((title) => ({
                 id: createEntityId('tsk'),
                 ownerId,
@@ -826,15 +845,33 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
                 completed: false,
                 autoGenerated: true,
               }))
-            : generateTasksForOrder(orderObj, ownerId, businessId, todayIso);
+            : generateTasksForOrder(orderObj, ownerId, businessId, todayIso)
+          : [];
 
-        if (isDemoMode) {
-          setTasks((prev) => [...generated, ...prev]);
-        } else {
-          for (const t of generated) {
-            await saveTaskFirestore(t, true);
-          }
+      if (isDemoMode) {
+        if (newCustomerObj) {
+          setCustomers((prev) =>
+            [...prev, newCustomerObj!].sort((a, b) => a.name.localeCompare(b.name))
+          );
         }
+        setOrders((prev) =>
+          isNew ? [orderObj, ...prev] : prev.map((o) => (o.id === orderObj.id ? orderObj : o))
+        );
+        if (initialPay) {
+          setPayments((prev) => [initialPay, ...prev]);
+        }
+        if (generatedTasks.length > 0) {
+          setTasks((prev) => [...generatedTasks, ...prev]);
+        }
+      } else if (isNew) {
+        await createOrderAtomicFirestore({
+          order: orderObj,
+          newCustomer: newCustomerObj,
+          initialPayment: initialPay,
+          initialTasks: generatedTasks,
+        });
+      } else {
+        await saveOrderFirestore(orderObj, false);
       }
 
       showToast(
@@ -918,6 +955,17 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
   const deleteOrder = useCallback(
     async (orderId: string) => {
+      const target = orders.find((o) => o.id === orderId);
+      const hasPayments =
+        (target && target.amountPaid > 0) || payments.some((p) => p.orderId === orderId);
+
+      if (hasPayments) {
+        const msg =
+          'Orders with recorded payments cannot be permanently deleted. Archive this order instead to keep your revenue history accurate.';
+        showToast(msg, 'error');
+        throw new Error(msg);
+      }
+
       const relatedTasks = tasks.filter((t) => t.orderId === orderId);
       if (isDemoMode) {
         setOrders((prev) => prev.filter((o) => o.id !== orderId));
@@ -931,7 +979,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       if (selectedOrderId === orderId) setSelectedOrderId(null);
       showToast('Order deleted.', 'info');
     },
-    [isDemoMode, tasks, selectedOrderId, showToast]
+    [orders, payments, isDemoMode, tasks, selectedOrderId, showToast]
   );
 
   const recordPayment = useCallback(
@@ -940,11 +988,24 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       params: { amount: number; date: string; method: PaymentMethod; notes: string }
     ) => {
       const order = orders.find((o) => o.id === orderId);
-      if (!order) return;
-      const cleanAmount = roundMoney(params.amount);
-      if (cleanAmount <= 0) return;
+      if (!order) {
+        throw new Error('Order could not be found.');
+      }
+      if (order.status === 'Cancelled') {
+        throw new Error('Payments cannot be recorded on cancelled orders.');
+      }
 
-      const newPaid = Math.min(order.totalPrice, roundMoney(order.amountPaid + cleanAmount));
+      const cleanAmount = roundMoney(params.amount);
+      if (!Number.isFinite(cleanAmount) || cleanAmount <= 0) {
+        throw new Error('Enter a payment amount greater than zero.');
+      }
+
+      const remaining = roundMoney(order.remainingBalance);
+      if (cleanAmount > remaining + 0.005) {
+        throw new Error(`Only ${formatCurrency(remaining, business.currency)} remains on this order.`);
+      }
+
+      const newPaid = roundMoney(order.amountPaid + cleanAmount);
       const bal = calculateOrderBalance(order.totalPrice, newPaid, order.depositRequired);
       const updatedOrder: Order = {
         ...order,
@@ -979,9 +1040,12 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           );
         }
       } else {
-        await createPaymentFirestore(paymentRec);
-        await saveOrderFirestore(updatedOrder, false);
-        if (bal.remainingBalance === 0) {
+        const txResult = await recordPaymentAtomicFirestore({
+          orderId: order.id,
+          payment: paymentRec,
+          currency: business.currency,
+        });
+        if (txResult.remainingBalance === 0) {
           const payTasks = tasks.filter(
             (t) =>
               t.orderId === orderId &&

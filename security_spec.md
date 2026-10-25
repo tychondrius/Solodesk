@@ -9,15 +9,18 @@
    - Every `get`, `list`, `create`, `update`, and `delete` operation strictly enforces `ownerId == request.auth.uid` (or `userId == request.auth.uid` on `/users/{userId}`).
 3. **PII Isolation**:
    - `/users/{userId}` and `/customers/{customerId}` contain private PII (`email`, `phone`, `address`). Blanket `isSignedIn()` reads are strictly prohibited; only the verified owner (`request.auth.uid`) may read or list their own documents.
-4. **Relational Integrity**:
+4. **Relational & Atomic Batch Integrity**:
    - No `Customer`, `Order`, `Payment`, `Expense`, `Task`, or `Notification` can be created unless `/businesses/$(request.auth.uid)` exists and is owned by `request.auth.uid`.
-   - Creating an `Order` requires `exists(/databases/$(database)/documents/customers/$(incoming().customerId))` owned by `request.auth.uid`.
-   - Creating a `Payment` requires `exists(/databases/$(database)/documents/orders/$(incoming().orderId))` owned by `request.auth.uid`.
-5. **Anti-Update-Gap & Strict Key Allowlisting**:
+   - Creating an `Order` requires `getAfter(/databases/$(database)/documents/customers/$(incoming().customerId)).data.ownerId == request.auth.uid` (supporting both existing customers and atomic customer+order batch creation).
+   - Creating a `Payment` requires `getAfter(/databases/$(database)/documents/orders/$(incoming().orderId)).data.ownerId == request.auth.uid` and `status != 'Cancelled'`.
+5. **Anti-Update-Gap, Financial Balance & Audit Ledger Invariants**:
    - Every `create` and `update` executes `isValid[Entity](incoming())` checking `keys().hasAll(...)`, `keys().hasOnly(...)`, strict types, regex ID patterns, and `.size()` bounds.
+   - `isValidOrder` enforces `amountPaid <= totalPrice` and `|(totalPrice - amountPaid) - remainingBalance| < 0.01`, preventing overpayments or corrupted balances.
+   - Paid orders (`existing().amountPaid > 0`) cannot be permanently deleted (`allow delete` requires `existing().amountPaid == 0`); users archive paid orders instead so historical revenue remains intact.
+   - Recorded `Payment` ledger entries cannot be deleted (`allow delete: if false;`).
    - Every `update` explicitly enforces `affectedKeys().hasOnly(...)`, immutable `id`, `ownerId`, `businessId`, and `createdAt`, plus `updatedAt == request.time`.
 6. **Terminal State Locking**:
-   - Once an `Order` reaches terminal `status == 'Cancelled'`, subsequent `update` operations on that document are denied (users may duplicate to start a fresh order or delete if needed).
+   - Once an `Order` reaches terminal `status == 'Cancelled'`, subsequent `update` operations and new `Payment` creations on that document are denied.
 
 ## 2. The "Dirty Dozen" Adversarial Payloads
 

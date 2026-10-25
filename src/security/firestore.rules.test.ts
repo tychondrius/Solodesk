@@ -19,6 +19,7 @@ interface SimContext {
   auth: SimAuth | null;
   requestTimeIso: string;
   existingDocs: Record<string, Record<string, unknown>>;
+  afterDocs?: Record<string, Record<string, unknown>>;
 }
 
 function evalCreateOrderRule(
@@ -50,7 +51,19 @@ function evalCreateOrderRule(
   if (typeof incoming.totalPrice !== 'number' || incoming.totalPrice < 0) {
     return 'PERMISSION_DENIED';
   }
-  if (typeof incoming.amountPaid !== 'number' || incoming.amountPaid < 0) {
+  if (
+    typeof incoming.amountPaid !== 'number' ||
+    incoming.amountPaid < 0 ||
+    incoming.amountPaid > incoming.totalPrice
+  ) {
+    return 'PERMISSION_DENIED';
+  }
+  if (
+    typeof incoming.remainingBalance !== 'number' ||
+    incoming.remainingBalance < 0 ||
+    incoming.remainingBalance > incoming.totalPrice ||
+    Math.abs(incoming.totalPrice - incoming.amountPaid - incoming.remainingBalance) >= 0.01
+  ) {
     return 'PERMISSION_DENIED';
   }
   if (incoming.createdAt !== ctx.requestTimeIso || incoming.updatedAt !== ctx.requestTimeIso) {
@@ -58,7 +71,8 @@ function evalCreateOrderRule(
   }
   const bizDoc = ctx.existingDocs[`businesses/${ctx.auth.uid}`];
   if (!bizDoc) return 'PERMISSION_DENIED';
-  const custDoc = ctx.existingDocs[`customers/${incoming.customerId}`];
+  const afterState = ctx.afterDocs || ctx.existingDocs;
+  const custDoc = afterState[`customers/${incoming.customerId}`];
   if (!custDoc || custDoc.ownerId !== ctx.auth.uid) return 'PERMISSION_DENIED';
 
   return 'ALLOWED';
@@ -77,16 +91,19 @@ function evalUpdateOrderRule(
     return 'PERMISSION_DENIED';
   }
   if (incoming.updatedAt !== ctx.requestTimeIso) return 'PERMISSION_DENIED';
-  // Validate schema via same validator
-  const createCheck = evalCreateOrderRule(
-    orderId,
-    { ...incoming, createdAt: ctx.requestTimeIso },
-    ctx
-  );
-  return createCheck;
+  return evalCreateOrderRule(orderId, { ...incoming, createdAt: ctx.requestTimeIso }, ctx);
 }
 
-test('Firestore rules file enforces all 8 SoloDesk collections and default-deny net', () => {
+function evalDeleteOrderRule(orderId: string, ctx: SimContext): 'ALLOWED' | 'PERMISSION_DENIED' {
+  if (!ctx.auth || !ctx.auth.emailVerified) return 'PERMISSION_DENIED';
+  if (!ID_REGEX.test(orderId) || orderId.length > 128) return 'PERMISSION_DENIED';
+  const existing = ctx.existingDocs[`orders/${orderId}`];
+  if (!existing || existing.ownerId !== ctx.auth.uid) return 'PERMISSION_DENIED';
+  if (existing.amountPaid !== 0) return 'PERMISSION_DENIED';
+  return 'ALLOWED';
+}
+
+test('Firestore rules file enforces all 8 SoloDesk collections, financial balance invariants, and paid-order delete block', () => {
   const rulesText = fs.readFileSync(rulesPath, 'utf8');
   const blueprint = JSON.parse(fs.readFileSync(blueprintPath, 'utf8'));
 
@@ -105,15 +122,20 @@ test('Firestore rules file enforces all 8 SoloDesk collections and default-deny 
   // Ensure no blanket allow read/list: if isSignedIn()
   assert.equal(/allow\s+(read|list)\s*:\s*if\s+isSignedIn\(\)\s*;/.test(rulesText), false);
 
-  // Ensure pre-onboarding getDoc on businesses/{uid} succeeds when resource == null for owner only
+  // Ensure overpayment & balance consistency invariants exist in isValidOrder
+  assert.ok(rulesText.includes('data.amountPaid <= data.totalPrice'));
+  assert.ok(rulesText.includes('((data.totalPrice - data.amountPaid) - data.remainingBalance) < 0.01'));
+
+  // Ensure paid orders cannot be permanently deleted and payment audit records cannot be deleted
+  assert.ok(rulesText.includes('existing().amountPaid == 0'));
   assert.ok(
     rulesText.includes(
-      'allow get: if isValidId(businessId) && isOwnerUid(businessId) && (resource == null || existing().ownerId == request.auth.uid);'
+      'getAfter(/databases/$(database)/documents/orders/$(incoming().orderId)).data.status != \'Cancelled\''
     )
   );
 });
 
-test('Dirty Dozen adversarial payloads all return PERMISSION_DENIED', () => {
+test('Dirty Dozen + Financial Overpayment & Paid-Order Deletion adversarial payloads return PERMISSION_DENIED', () => {
   const now = '2026-10-25T12:00:00Z';
   const validOrder = {
     id: 'ord_1',
@@ -146,6 +168,7 @@ test('Dirty Dozen adversarial payloads all return PERMISSION_DENIED', () => {
     'businesses/userA': { id: 'userA', ownerId: 'userA' },
     'customers/cust_1': { id: 'cust_1', ownerId: 'userA' },
     'orders/ord_1': { ...validOrder },
+    'orders/ord_unpaid': { ...validOrder, id: 'ord_unpaid', amountPaid: 0, remainingBalance: 22, depositPaid: false },
     'orders/ord_cancelled': { ...validOrder, id: 'ord_cancelled', status: 'Cancelled' },
   };
 
@@ -157,6 +180,22 @@ test('Dirty Dozen adversarial payloads all return PERMISSION_DENIED', () => {
 
   // Sanity check: valid owner payload succeeds
   assert.equal(evalCreateOrderRule('ord_1', validOrder, verifiedUserA), 'ALLOWED');
+
+  // Atomic batch creation of new customer + order succeeds via getAfter
+  assert.equal(
+    evalCreateOrderRule(
+      'ord_2',
+      { ...validOrder, id: 'ord_2', customerId: 'cust_new_batch' },
+      {
+        ...verifiedUserA,
+        afterDocs: {
+          ...baseDocs,
+          'customers/cust_new_batch': { id: 'cust_new_batch', ownerId: 'userA' },
+        },
+      }
+    ),
+    'ALLOWED'
+  );
 
   // 1. Unverified email write
   assert.equal(
@@ -179,7 +218,7 @@ test('Dirty Dozen adversarial payloads all return PERMISSION_DENIED', () => {
     'PERMISSION_DENIED'
   );
 
-  // 4. PII blanket read / cross-tenant update
+  // 4. Cross-tenant update
   assert.equal(
     evalUpdateOrderRule('ord_1', validOrder, {
       ...verifiedUserA,
@@ -243,4 +282,28 @@ test('Dirty Dozen adversarial payloads all return PERMISSION_DENIED', () => {
     ),
     'PERMISSION_DENIED'
   );
+
+  // 13. Overpayment payload (amountPaid > totalPrice) rejected
+  assert.equal(
+    evalUpdateOrderRule(
+      'ord_1',
+      { ...validOrder, amountPaid: 26, remainingBalance: 0 },
+      verifiedUserA
+    ),
+    'PERMISSION_DENIED'
+  );
+
+  // 14. Inconsistent remainingBalance math rejected
+  assert.equal(
+    evalUpdateOrderRule(
+      'ord_1',
+      { ...validOrder, amountPaid: 11, remainingBalance: 5 },
+      verifiedUserA
+    ),
+    'PERMISSION_DENIED'
+  );
+
+  // 15. Deleting an order with recorded payments (amountPaid > 0) rejected; unpaid order allowed
+  assert.equal(evalDeleteOrderRule('ord_1', verifiedUserA), 'PERMISSION_DENIED');
+  assert.equal(evalDeleteOrderRule('ord_unpaid', verifiedUserA), 'ALLOWED');
 });

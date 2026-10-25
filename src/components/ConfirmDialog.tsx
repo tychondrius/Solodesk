@@ -1,5 +1,6 @@
 import React from 'react';
 import { AlertTriangle, X } from 'lucide-react';
+import { useLockBodyScroll } from '../utils/useLockBodyScroll';
 
 interface ConfirmDialogProps {
   open: boolean;
@@ -22,6 +23,8 @@ export function ConfirmDialog({
   onConfirm,
   onCancel,
 }: ConfirmDialogProps) {
+  useLockBodyScroll(open);
+
   if (!open) return null;
 
   return (

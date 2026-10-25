@@ -3,6 +3,7 @@ import { CheckSquare, Plus, Square, Trash2, X } from 'lucide-react';
 import { useApp } from '../context/AppContext';
 import { TaskItem, TaskPriority } from '../types';
 import { diffDays, formatRelativeDue } from '../utils/businessLogic';
+import { useLockBodyScroll } from '../utils/useLockBodyScroll';
 import { ConfirmDialog } from './ConfirmDialog';
 
 type TaskBucket = 'today' | 'upcoming' | 'overdue' | 'completed';
@@ -22,6 +23,7 @@ export function TasksView() {
 
   const [bucket, setBucket] = useState<TaskBucket>('today');
   const [modalOpen, setModalOpen] = useState(false);
+  useLockBodyScroll(modalOpen);
   const [title, setTitle] = useState('');
   const [customerId, setCustomerId] = useState('');
   const [orderId, setOrderId] = useState('');
@@ -236,7 +238,7 @@ export function TasksView() {
       {/* Add Manual Task Modal */}
       {modalOpen && (
         <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4 backdrop-blur-xs"
+          className="fixed inset-0 z-50 flex items-end justify-center bg-black/50 p-0 backdrop-blur-xs sm:items-center sm:p-4"
           role="dialog"
           aria-modal="true"
           aria-labelledby="new-task-title"
@@ -244,7 +246,7 @@ export function TasksView() {
             if (e.target === e.currentTarget) setModalOpen(false);
           }}
         >
-          <div className="w-full max-w-md rounded-2xl border border-stone-200 bg-white p-6 shadow-2xl dark:border-zinc-800 dark:bg-zinc-900">
+          <div className="max-h-[92dvh] w-full max-w-md overflow-y-auto overscroll-contain rounded-t-2xl border border-stone-200 bg-white p-4 pb-safe shadow-2xl sm:rounded-2xl sm:p-6 dark:border-zinc-800 dark:bg-zinc-900">
             <div className="flex items-center justify-between">
               <h3
                 id="new-task-title"

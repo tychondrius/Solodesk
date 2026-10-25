@@ -5,17 +5,20 @@ import {
   getDoc,
   onSnapshot,
   query,
+  runTransaction,
   serverTimestamp,
   setDoc,
   Timestamp,
   Unsubscribe,
   updateDoc,
   where,
+  writeBatch,
 } from 'firebase/firestore';
 import { db, handleFirestoreError, OperationType } from '../firebase';
 import {
   AppNotification,
   BusinessProfile,
+  CurrencyCode,
   Customer,
   ExpenseRecord,
   Order,
@@ -23,7 +26,20 @@ import {
   TaskItem,
   UserProfile,
 } from '../types';
-import { clampString, roundMoney, sanitizeId } from '../utils/businessLogic';
+import {
+  calculateOrderBalance,
+  clampString,
+  formatCurrency,
+  roundMoney,
+  sanitizeId,
+} from '../utils/businessLogic';
+
+export class BusinessValidationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'BusinessValidationError';
+  }
+}
 
 function serializeTimestamp(val: unknown): string | undefined {
   if (!val) return undefined;
@@ -503,11 +519,127 @@ export async function saveOrderFirestore(order: Order, isNew: boolean): Promise<
   }
 }
 
+export async function createOrderAtomicFirestore(params: {
+  order: Order;
+  newCustomer?: Customer | null;
+  initialPayment?: PaymentRecord | null;
+  initialTasks?: TaskItem[];
+}): Promise<void> {
+  const { order, newCustomer, initialPayment, initialTasks = [] } = params;
+  const orderId = sanitizeId(order.id);
+  const total = Math.max(0, Math.min(1000000, roundMoney(order.totalPrice)));
+  const paid = Math.max(0, Math.min(total, roundMoney(order.amountPaid)));
+  const depReq = Math.max(0, Math.min(total, roundMoney(order.depositRequired)));
+  const rem = Math.max(0, roundMoney(total - paid));
+
+  const batch = writeBatch(db);
+
+  if (newCustomer) {
+    const custId = sanitizeId(newCustomer.id);
+    batch.set(doc(db, 'customers', custId), {
+      id: custId,
+      ownerId: sanitizeId(newCustomer.ownerId),
+      businessId: sanitizeId(newCustomer.businessId),
+      name: clampString(newCustomer.name, 140) || 'Customer',
+      email: clampString(newCustomer.email, 254),
+      phone: clampString(newCustomer.phone, 50),
+      instagram: clampString(newCustomer.instagram, 80),
+      facebook: clampString(newCustomer.facebook, 120),
+      address: clampString(newCustomer.address, 400),
+      notes: clampString(newCustomer.notes, 2000),
+      lastInteractionAt: clampString(newCustomer.lastInteractionAt, 40),
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    });
+  }
+
+  batch.set(doc(db, 'orders', orderId), {
+    id: orderId,
+    orderNumber: clampString(order.orderNumber, 32) || 'SD-1001',
+    ownerId: sanitizeId(order.ownerId),
+    businessId: sanitizeId(order.businessId),
+    customerId: sanitizeId(order.customerId),
+    customerName: clampString(order.customerName, 140) || 'Customer',
+    product: clampString(order.product, 200) || 'Order',
+    description: clampString(order.description, 2000),
+    quantity: Math.max(1, Math.min(10000, Math.round(order.quantity || 1))),
+    totalPrice: total,
+    depositRequired: depReq,
+    depositPaid: Boolean(order.depositPaid),
+    amountPaid: paid,
+    remainingBalance: rem,
+    orderDate: clampString(order.orderDate, 32) || new Date().toISOString().slice(0, 10),
+    dueDate: clampString(order.dueDate, 32),
+    deliveryMethod: clampString(order.deliveryMethod, 60),
+    trackingNumber: clampString(order.trackingNumber, 100),
+    status: order.status,
+    archived: Boolean(order.archived),
+    customerNotes: clampString(order.customerNotes, 2000),
+    internalNotes: clampString(order.internalNotes, 2000),
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+  });
+
+  if (initialPayment && paid > 0) {
+    const payId = sanitizeId(initialPayment.id);
+    batch.set(doc(db, 'payments', payId), {
+      id: payId,
+      ownerId: sanitizeId(initialPayment.ownerId),
+      businessId: sanitizeId(initialPayment.businessId),
+      orderId,
+      customerId: sanitizeId(initialPayment.customerId),
+      customerName: clampString(initialPayment.customerName, 140) || 'Customer',
+      amount: Math.max(0.01, Math.min(1000000, paid)),
+      date: clampString(initialPayment.date, 32) || new Date().toISOString().slice(0, 10),
+      method: initialPayment.method,
+      notes: clampString(initialPayment.notes, 500),
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    });
+  }
+
+  for (const task of initialTasks) {
+    const taskId = sanitizeId(task.id);
+    batch.set(doc(db, 'tasks', taskId), {
+      id: taskId,
+      ownerId: sanitizeId(task.ownerId),
+      businessId: sanitizeId(task.businessId),
+      title: clampString(task.title, 240) || 'Task',
+      customerId: task.customerId ? sanitizeId(task.customerId) : '',
+      customerName: clampString(task.customerName, 140),
+      orderId: task.orderId ? sanitizeId(task.orderId) : '',
+      orderNumber: clampString(task.orderNumber, 32),
+      dueDate: clampString(task.dueDate, 32),
+      priority: task.priority,
+      completed: Boolean(task.completed),
+      autoGenerated: Boolean(task.autoGenerated),
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    });
+  }
+
+  try {
+    await batch.commit();
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, `orders/${orderId}`);
+  }
+}
+
 export async function deleteOrderFirestore(id: string): Promise<void> {
   const safeId = sanitizeId(id);
+  const orderRef = doc(db, 'orders', safeId);
   try {
-    await deleteDoc(doc(db, 'orders', safeId));
+    const snap = await getDoc(orderRef);
+    if (snap.exists() && Number(snap.data().amountPaid || 0) > 0) {
+      throw new BusinessValidationError(
+        'Orders with recorded payments cannot be permanently deleted. Please archive this order instead.'
+      );
+    }
+    await deleteDoc(orderRef);
   } catch (error) {
+    if (error instanceof BusinessValidationError) {
+      throw error;
+    }
     handleFirestoreError(error, OperationType.DELETE, `orders/${safeId}`);
   }
 }
@@ -531,6 +663,79 @@ export async function createPaymentFirestore(payment: PaymentRecord): Promise<vo
     });
   } catch (error) {
     handleFirestoreError(error, OperationType.CREATE, `payments/${id}`);
+  }
+}
+
+export async function recordPaymentAtomicFirestore(params: {
+  orderId: string;
+  payment: PaymentRecord;
+  currency: CurrencyCode;
+}): Promise<{ remainingBalance: number }> {
+  const safeOrderId = sanitizeId(params.orderId);
+  const safePaymentId = sanitizeId(params.payment.id);
+  const cleanAmount = roundMoney(params.payment.amount);
+  if (cleanAmount <= 0) {
+    throw new BusinessValidationError('Enter a payment amount greater than zero.');
+  }
+
+  const orderRef = doc(db, 'orders', safeOrderId);
+  const paymentRef = doc(db, 'payments', safePaymentId);
+
+  try {
+    return await runTransaction(db, async (tx) => {
+      const orderSnap = await tx.get(orderRef);
+      if (!orderSnap.exists()) {
+        throw new BusinessValidationError('Order could not be found.');
+      }
+      const orderData = orderSnap.data();
+      if (orderData.status === 'Cancelled') {
+        throw new BusinessValidationError('Payments cannot be recorded on cancelled orders.');
+      }
+
+      const totalPrice = roundMoney(Number(orderData.totalPrice) || 0);
+      const currentPaid = roundMoney(Number(orderData.amountPaid) || 0);
+      const depositRequired = roundMoney(Number(orderData.depositRequired) || 0);
+      const currentRemaining = Math.max(0, roundMoney(totalPrice - currentPaid));
+
+      if (cleanAmount > currentRemaining + 0.005) {
+        throw new BusinessValidationError(
+          `Only ${formatCurrency(currentRemaining, params.currency)} remains on this order.`
+        );
+      }
+
+      const nextPaid = roundMoney(currentPaid + cleanAmount);
+      const bal = calculateOrderBalance(totalPrice, nextPaid, depositRequired);
+
+      tx.set(paymentRef, {
+        id: safePaymentId,
+        ownerId: sanitizeId(params.payment.ownerId),
+        businessId: sanitizeId(params.payment.businessId),
+        orderId: safeOrderId,
+        customerId: sanitizeId(params.payment.customerId),
+        customerName: clampString(params.payment.customerName, 140) || 'Customer',
+        amount: cleanAmount,
+        date: clampString(params.payment.date, 32) || new Date().toISOString().slice(0, 10),
+        method: params.payment.method,
+        notes: clampString(params.payment.notes, 500),
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+
+      tx.update(orderRef, {
+        amountPaid: bal.amountPaid,
+        remainingBalance: bal.remainingBalance,
+        depositPaid: bal.depositPaid,
+        updatedAt: serverTimestamp(),
+      });
+
+      return { remainingBalance: bal.remainingBalance };
+    });
+  } catch (error) {
+    if (error instanceof BusinessValidationError) {
+      throw error;
+    }
+    handleFirestoreError(error, OperationType.WRITE, `payments/${safePaymentId}`);
+    return { remainingBalance: 0 };
   }
 }
 

@@ -4,6 +4,7 @@ import { useApp } from '../context/AppContext';
 import { MessagePresetType } from '../types';
 import { generateCustomerMessage } from '../services/aiClient';
 import { draftMessageLocally, formatCurrency, formatShortDate } from '../utils/businessLogic';
+import { useLockBodyScroll } from '../utils/useLockBodyScroll';
 
 const PRESETS: { id: MessagePresetType; label: string }[] = [
   { id: 'payment_reminder', label: 'Payment reminder' },
@@ -16,6 +17,8 @@ const PRESETS: { id: MessagePresetType; label: string }[] = [
 
 export function MessageWriterModal() {
   const { messageModal, closeMessageModal, business, showToast } = useApp();
+  useLockBodyScroll(messageModal.open);
+
   const [preset, setPreset] = useState<MessagePresetType>('payment_reminder');
   const [customPrompt, setCustomPrompt] = useState('');
   const [messageText, setMessageText] = useState('');
@@ -86,7 +89,7 @@ export function MessageWriterModal() {
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4 backdrop-blur-xs"
+      className="fixed inset-0 z-50 flex items-end justify-center bg-black/50 p-0 backdrop-blur-xs sm:items-center sm:p-4"
       role="dialog"
       aria-modal="true"
       aria-labelledby="msg-writer-title"
@@ -94,7 +97,7 @@ export function MessageWriterModal() {
         if (e.target === e.currentTarget) closeMessageModal();
       }}
     >
-      <div className="w-full max-w-lg rounded-2xl border border-stone-200 bg-white p-6 shadow-2xl dark:border-zinc-800 dark:bg-zinc-900">
+      <div className="max-h-[92dvh] w-full max-w-lg overflow-y-auto overscroll-contain rounded-t-2xl border border-stone-200 bg-white p-4 pb-safe shadow-2xl sm:rounded-2xl sm:p-6 dark:border-zinc-800 dark:bg-zinc-900">
         <div className="flex items-start justify-between gap-4">
           <div>
             <h2
