@@ -1,0 +1,694 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "Authenticated SoloDesk user account and preferences.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Firebase Auth UID of the user."
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120,
+          "description": "Display name of the business owner."
+        },
+        "email": {
+          "type": "string",
+          "format": "email",
+          "maxLength": 254,
+          "description": "Account email address (private to owner)."
+        },
+        "businessId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Associated business document ID."
+        },
+        "onboardingCompleted": {
+          "type": "boolean",
+          "description": "Whether initial business setup has been completed."
+        },
+        "plan": {
+          "type": "string",
+          "enum": ["free", "solo"],
+          "maxLength": 16,
+          "description": "Account plan tier."
+        },
+        "theme": {
+          "type": "string",
+          "enum": ["light", "dark"],
+          "maxLength": 16,
+          "description": "UI color mode preference."
+        },
+        "notificationsEnabled": {
+          "type": "boolean",
+          "description": "Whether in-app deadline and payment alerts are active."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server creation timestamp."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server update timestamp."
+        }
+      },
+      "required": [
+        "uid",
+        "name",
+        "email",
+        "businessId",
+        "onboardingCompleted",
+        "plan",
+        "theme",
+        "notificationsEnabled",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "Business": {
+      "title": "Business",
+      "description": "Small business workspace owned by an authenticated sole trader.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Business ID (matches owner UID for 1:1 isolation)."
+        },
+        "ownerId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "UID of the owning user."
+        },
+        "ownerName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120,
+          "description": "Name of the business owner."
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 140,
+          "description": "Trading name of the business."
+        },
+        "businessType": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120,
+          "description": "Category of small business (e.g., Illustrator, Baker, Craft Seller)."
+        },
+        "currency": {
+          "type": "string",
+          "enum": ["GBP", "EUR", "USD", "RON"],
+          "maxLength": 8,
+          "description": "ISO currency code used across orders and expenses."
+        },
+        "plan": {
+          "type": "string",
+          "enum": ["free", "solo"],
+          "maxLength": 16,
+          "description": "Subscription tier architecture."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server creation timestamp."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server update timestamp."
+        }
+      },
+      "required": [
+        "id",
+        "ownerId",
+        "ownerName",
+        "name",
+        "businessType",
+        "currency",
+        "plan",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "Customer": {
+      "title": "Customer",
+      "description": "Customer CRM record strictly scoped to a single business owner.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "ownerId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "businessId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 140
+        },
+        "email": {
+          "type": "string",
+          "maxLength": 254
+        },
+        "phone": {
+          "type": "string",
+          "maxLength": 50
+        },
+        "instagram": {
+          "type": "string",
+          "maxLength": 80
+        },
+        "facebook": {
+          "type": "string",
+          "maxLength": 120
+        },
+        "address": {
+          "type": "string",
+          "maxLength": 400
+        },
+        "notes": {
+          "type": "string",
+          "maxLength": 2000
+        },
+        "lastInteractionAt": {
+          "type": "string",
+          "maxLength": 40
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "ownerId",
+        "businessId",
+        "name",
+        "email",
+        "phone",
+        "instagram",
+        "facebook",
+        "address",
+        "notes",
+        "lastInteractionAt",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "Order": {
+      "title": "Order",
+      "description": "Customer order with pricing, deposit/payment progress, delivery details, and status.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "orderNumber": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32
+        },
+        "ownerId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "businessId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "customerId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "customerName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 140
+        },
+        "product": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "description": {
+          "type": "string",
+          "maxLength": 2000
+        },
+        "quantity": {
+          "type": "number"
+        },
+        "totalPrice": {
+          "type": "number"
+        },
+        "depositRequired": {
+          "type": "number"
+        },
+        "depositPaid": {
+          "type": "boolean"
+        },
+        "amountPaid": {
+          "type": "number"
+        },
+        "remainingBalance": {
+          "type": "number"
+        },
+        "orderDate": {
+          "type": "string",
+          "maxLength": 32
+        },
+        "dueDate": {
+          "type": "string",
+          "maxLength": 32
+        },
+        "deliveryMethod": {
+          "type": "string",
+          "maxLength": 60
+        },
+        "trackingNumber": {
+          "type": "string",
+          "maxLength": 100
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "New",
+            "In Progress",
+            "Waiting for Customer",
+            "Ready",
+            "Dispatched",
+            "Completed",
+            "Cancelled"
+          ],
+          "maxLength": 32
+        },
+        "archived": {
+          "type": "boolean"
+        },
+        "customerNotes": {
+          "type": "string",
+          "maxLength": 2000
+        },
+        "internalNotes": {
+          "type": "string",
+          "maxLength": 2000
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "orderNumber",
+        "ownerId",
+        "businessId",
+        "customerId",
+        "customerName",
+        "product",
+        "description",
+        "quantity",
+        "totalPrice",
+        "depositRequired",
+        "depositPaid",
+        "amountPaid",
+        "remainingBalance",
+        "orderDate",
+        "dueDate",
+        "deliveryMethod",
+        "trackingNumber",
+        "status",
+        "archived",
+        "customerNotes",
+        "internalNotes",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "Payment": {
+      "title": "Payment",
+      "description": "Payment transaction recorded against a specific order.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "ownerId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "businessId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "orderId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "customerId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "customerName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 140
+        },
+        "amount": {
+          "type": "number"
+        },
+        "date": {
+          "type": "string",
+          "maxLength": 32
+        },
+        "method": {
+          "type": "string",
+          "enum": ["Cash", "Bank transfer", "Card", "PayPal", "SumUp", "Other"],
+          "maxLength": 32
+        },
+        "notes": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "ownerId",
+        "businessId",
+        "orderId",
+        "customerId",
+        "customerName",
+        "amount",
+        "date",
+        "method",
+        "notes",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "Expense": {
+      "title": "Expense",
+      "description": "Business expense entry logged by the sole trader.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "ownerId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "businessId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "category": {
+          "type": "string",
+          "enum": [
+            "Materials",
+            "Postage",
+            "Advertising",
+            "Software",
+            "Equipment",
+            "Travel",
+            "Other"
+          ],
+          "maxLength": 32
+        },
+        "amount": {
+          "type": "number"
+        },
+        "date": {
+          "type": "string",
+          "maxLength": 32
+        },
+        "notes": {
+          "type": "string",
+          "maxLength": 1000
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "ownerId",
+        "businessId",
+        "description",
+        "category",
+        "amount",
+        "date",
+        "notes",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "Task": {
+      "title": "Task",
+      "description": "Auto-generated or manual workflow task associated with a business, customer, or order.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "ownerId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "businessId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 240
+        },
+        "customerId": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "customerName": {
+          "type": "string",
+          "maxLength": 140
+        },
+        "orderId": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "orderNumber": {
+          "type": "string",
+          "maxLength": 32
+        },
+        "dueDate": {
+          "type": "string",
+          "maxLength": 32
+        },
+        "priority": {
+          "type": "string",
+          "enum": ["Low", "Medium", "High"],
+          "maxLength": 16
+        },
+        "completed": {
+          "type": "boolean"
+        },
+        "autoGenerated": {
+          "type": "boolean"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "ownerId",
+        "businessId",
+        "title",
+        "customerId",
+        "customerName",
+        "orderId",
+        "orderNumber",
+        "dueDate",
+        "priority",
+        "completed",
+        "autoGenerated",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "Notification": {
+      "title": "Notification",
+      "description": "In-app alert for deadlines, overdue orders, tasks due today, or outstanding balances.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "ownerId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "businessId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "type": {
+          "type": "string",
+          "enum": ["deadline", "overdue", "payment", "task", "approval"],
+          "maxLength": 32
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500
+        },
+        "relatedOrderId": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "relatedCustomerId": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "read": {
+          "type": "boolean"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "ownerId",
+        "businessId",
+        "type",
+        "title",
+        "message",
+        "relatedOrderId",
+        "relatedCustomerId",
+        "read",
+        "createdAt",
+        "updatedAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "Private user account profile isolated to userId == request.auth.uid."
+    },
+    "/businesses/{businessId}": {
+      "schema": "Business",
+      "description": "Business workspace configuration owned by ownerId == request.auth.uid."
+    },
+    "/customers/{customerId}": {
+      "schema": "Customer",
+      "description": "CRM customer records belonging to an authenticated user's business."
+    },
+    "/orders/{orderId}": {
+      "schema": "Order",
+      "description": "Orders belonging to an authenticated user's business."
+    },
+    "/payments/{paymentId}": {
+      "schema": "Payment",
+      "description": "Recorded payments linked to orders within the user's business."
+    },
+    "/expenses/{expenseId}": {
+      "schema": "Expense",
+      "description": "Business expense records belonging to an authenticated user's business."
+    },
+    "/tasks/{taskId}": {
+      "schema": "Task",
+      "description": "Auto-generated and manual tasks scoped to an authenticated user's business."
+    },
+    "/notifications/{notificationId}": {
+      "schema": "Notification",
+      "description": "In-app notifications scoped to an authenticated user's business."
+    }
+  }
+}

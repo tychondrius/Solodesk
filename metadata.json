@@ -1,0 +1,6 @@
+{
+  "name": "SoloDesk",
+  "description": "AI-powered order, customer, payment, and task manager built for sole traders, makers, and independent small businesses.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

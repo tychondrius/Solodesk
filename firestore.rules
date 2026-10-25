@@ -1,0 +1,500 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Pillar 1: Global Default-Deny Safety Net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Hardened Global Primitives
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerifiedUser() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isOptionalId(id) {
+      return id is string && id.size() <= 128 && (id.size() == 0 || id.matches('^[a-zA-Z0-9_\\-]+$'));
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isOwnerUid(uid) {
+      return isVerifiedUser() && request.auth.uid == uid;
+    }
+
+    function businessOwnedByCaller(businessId) {
+      return businessId == request.auth.uid &&
+        exists(/databases/$(database)/documents/businesses/$(request.auth.uid));
+    }
+
+    // Validation Blueprints (Anti-Update-Gap)
+    function isValidUser(data, userId) {
+      return data.keys().hasAll([
+          'uid', 'name', 'email', 'businessId', 'onboardingCompleted',
+          'plan', 'theme', 'notificationsEnabled', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'uid', 'name', 'email', 'businessId', 'onboardingCompleted',
+          'plan', 'theme', 'notificationsEnabled', 'createdAt', 'updatedAt'
+        ]) &&
+        data.uid == userId &&
+        data.uid == request.auth.uid &&
+        isValidId(data.uid) &&
+        data.name is string && data.name.size() >= 1 && data.name.size() <= 120 &&
+        data.email is string && data.email.size() >= 3 && data.email.size() <= 254 &&
+        data.businessId == request.auth.uid &&
+        isValidId(data.businessId) &&
+        data.onboardingCompleted is bool &&
+        data.plan is string && data.plan.size() <= 16 && data.plan in ['free', 'solo'] &&
+        data.theme is string && data.theme.size() <= 16 && data.theme in ['light', 'dark'] &&
+        data.notificationsEnabled is bool &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidBusiness(data, businessId) {
+      return data.keys().hasAll([
+          'id', 'ownerId', 'ownerName', 'name', 'businessType',
+          'currency', 'plan', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'id', 'ownerId', 'ownerName', 'name', 'businessType',
+          'currency', 'plan', 'createdAt', 'updatedAt'
+        ]) &&
+        data.id == businessId &&
+        data.id == request.auth.uid &&
+        isValidId(data.id) &&
+        data.ownerId == request.auth.uid &&
+        isValidId(data.ownerId) &&
+        data.ownerName is string && data.ownerName.size() >= 1 && data.ownerName.size() <= 120 &&
+        data.name is string && data.name.size() >= 1 && data.name.size() <= 140 &&
+        data.businessType is string && data.businessType.size() >= 1 && data.businessType.size() <= 120 &&
+        data.currency is string && data.currency.size() <= 8 && data.currency in ['GBP', 'EUR', 'USD', 'RON'] &&
+        data.plan is string && data.plan.size() <= 16 && data.plan in ['free', 'solo'] &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidCustomer(data, customerId) {
+      return data.keys().hasAll([
+          'id', 'ownerId', 'businessId', 'name', 'email', 'phone',
+          'instagram', 'facebook', 'address', 'notes', 'lastInteractionAt',
+          'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'id', 'ownerId', 'businessId', 'name', 'email', 'phone',
+          'instagram', 'facebook', 'address', 'notes', 'lastInteractionAt',
+          'createdAt', 'updatedAt'
+        ]) &&
+        data.id == customerId &&
+        isValidId(data.id) &&
+        data.ownerId == request.auth.uid &&
+        isValidId(data.ownerId) &&
+        data.businessId == request.auth.uid &&
+        isValidId(data.businessId) &&
+        data.name is string && data.name.size() >= 1 && data.name.size() <= 140 &&
+        data.email is string && data.email.size() <= 254 &&
+        data.phone is string && data.phone.size() <= 50 &&
+        data.instagram is string && data.instagram.size() <= 80 &&
+        data.facebook is string && data.facebook.size() <= 120 &&
+        data.address is string && data.address.size() <= 400 &&
+        data.notes is string && data.notes.size() <= 2000 &&
+        data.lastInteractionAt is string && data.lastInteractionAt.size() <= 40 &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidOrder(data, orderId) {
+      return data.keys().hasAll([
+          'id', 'orderNumber', 'ownerId', 'businessId', 'customerId',
+          'customerName', 'product', 'description', 'quantity', 'totalPrice',
+          'depositRequired', 'depositPaid', 'amountPaid', 'remainingBalance',
+          'orderDate', 'dueDate', 'deliveryMethod', 'trackingNumber', 'status',
+          'archived', 'customerNotes', 'internalNotes', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'id', 'orderNumber', 'ownerId', 'businessId', 'customerId',
+          'customerName', 'product', 'description', 'quantity', 'totalPrice',
+          'depositRequired', 'depositPaid', 'amountPaid', 'remainingBalance',
+          'orderDate', 'dueDate', 'deliveryMethod', 'trackingNumber', 'status',
+          'archived', 'customerNotes', 'internalNotes', 'createdAt', 'updatedAt'
+        ]) &&
+        data.id == orderId &&
+        isValidId(data.id) &&
+        data.orderNumber is string && data.orderNumber.size() >= 1 && data.orderNumber.size() <= 32 &&
+        data.ownerId == request.auth.uid &&
+        isValidId(data.ownerId) &&
+        data.businessId == request.auth.uid &&
+        isValidId(data.businessId) &&
+        isValidId(data.customerId) &&
+        data.customerName is string && data.customerName.size() >= 1 && data.customerName.size() <= 140 &&
+        data.product is string && data.product.size() >= 1 && data.product.size() <= 200 &&
+        data.description is string && data.description.size() <= 2000 &&
+        data.quantity is number && data.quantity >= 1 && data.quantity <= 10000 &&
+        data.totalPrice is number && data.totalPrice >= 0 && data.totalPrice <= 1000000 &&
+        data.depositRequired is number && data.depositRequired >= 0 && data.depositRequired <= data.totalPrice &&
+        data.depositPaid is bool &&
+        data.amountPaid is number && data.amountPaid >= 0 && data.amountPaid <= 1000000 &&
+        data.remainingBalance is number && data.remainingBalance >= 0 && data.remainingBalance <= 1000000 &&
+        data.orderDate is string && data.orderDate.size() >= 1 && data.orderDate.size() <= 32 &&
+        data.dueDate is string && data.dueDate.size() <= 32 &&
+        data.deliveryMethod is string && data.deliveryMethod.size() <= 60 &&
+        data.trackingNumber is string && data.trackingNumber.size() <= 100 &&
+        data.status is string && data.status.size() <= 32 &&
+        data.status in [
+          'New', 'In Progress', 'Waiting for Customer',
+          'Ready', 'Dispatched', 'Completed', 'Cancelled'
+        ] &&
+        data.archived is bool &&
+        data.customerNotes is string && data.customerNotes.size() <= 2000 &&
+        data.internalNotes is string && data.internalNotes.size() <= 2000 &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidPayment(data, paymentId) {
+      return data.keys().hasAll([
+          'id', 'ownerId', 'businessId', 'orderId', 'customerId',
+          'customerName', 'amount', 'date', 'method', 'notes',
+          'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'id', 'ownerId', 'businessId', 'orderId', 'customerId',
+          'customerName', 'amount', 'date', 'method', 'notes',
+          'createdAt', 'updatedAt'
+        ]) &&
+        data.id == paymentId &&
+        isValidId(data.id) &&
+        data.ownerId == request.auth.uid &&
+        isValidId(data.ownerId) &&
+        data.businessId == request.auth.uid &&
+        isValidId(data.businessId) &&
+        isValidId(data.orderId) &&
+        isValidId(data.customerId) &&
+        data.customerName is string && data.customerName.size() >= 1 && data.customerName.size() <= 140 &&
+        data.amount is number && data.amount > 0 && data.amount <= 1000000 &&
+        data.date is string && data.date.size() >= 1 && data.date.size() <= 32 &&
+        data.method is string && data.method.size() <= 32 &&
+        data.method in ['Cash', 'Bank transfer', 'Card', 'PayPal', 'SumUp', 'Other'] &&
+        data.notes is string && data.notes.size() <= 500 &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidExpense(data, expenseId) {
+      return data.keys().hasAll([
+          'id', 'ownerId', 'businessId', 'description', 'category',
+          'amount', 'date', 'notes', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'id', 'ownerId', 'businessId', 'description', 'category',
+          'amount', 'date', 'notes', 'createdAt', 'updatedAt'
+        ]) &&
+        data.id == expenseId &&
+        isValidId(data.id) &&
+        data.ownerId == request.auth.uid &&
+        isValidId(data.ownerId) &&
+        data.businessId == request.auth.uid &&
+        isValidId(data.businessId) &&
+        data.description is string && data.description.size() >= 1 && data.description.size() <= 200 &&
+        data.category is string && data.category.size() <= 32 &&
+        data.category in [
+          'Materials', 'Postage', 'Advertising',
+          'Software', 'Equipment', 'Travel', 'Other'
+        ] &&
+        data.amount is number && data.amount > 0 && data.amount <= 1000000 &&
+        data.date is string && data.date.size() >= 1 && data.date.size() <= 32 &&
+        data.notes is string && data.notes.size() <= 1000 &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidTask(data, taskId) {
+      return data.keys().hasAll([
+          'id', 'ownerId', 'businessId', 'title', 'customerId', 'customerName',
+          'orderId', 'orderNumber', 'dueDate', 'priority', 'completed',
+          'autoGenerated', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'id', 'ownerId', 'businessId', 'title', 'customerId', 'customerName',
+          'orderId', 'orderNumber', 'dueDate', 'priority', 'completed',
+          'autoGenerated', 'createdAt', 'updatedAt'
+        ]) &&
+        data.id == taskId &&
+        isValidId(data.id) &&
+        data.ownerId == request.auth.uid &&
+        isValidId(data.ownerId) &&
+        data.businessId == request.auth.uid &&
+        isValidId(data.businessId) &&
+        data.title is string && data.title.size() >= 1 && data.title.size() <= 240 &&
+        isOptionalId(data.customerId) &&
+        data.customerName is string && data.customerName.size() <= 140 &&
+        isOptionalId(data.orderId) &&
+        data.orderNumber is string && data.orderNumber.size() <= 32 &&
+        data.dueDate is string && data.dueDate.size() <= 32 &&
+        data.priority is string && data.priority.size() <= 16 &&
+        data.priority in ['Low', 'Medium', 'High'] &&
+        data.completed is bool &&
+        data.autoGenerated is bool &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidNotification(data, notificationId) {
+      return data.keys().hasAll([
+          'id', 'ownerId', 'businessId', 'type', 'title', 'message',
+          'relatedOrderId', 'relatedCustomerId', 'read', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'id', 'ownerId', 'businessId', 'type', 'title', 'message',
+          'relatedOrderId', 'relatedCustomerId', 'read', 'createdAt', 'updatedAt'
+        ]) &&
+        data.id == notificationId &&
+        isValidId(data.id) &&
+        data.ownerId == request.auth.uid &&
+        isValidId(data.ownerId) &&
+        data.businessId == request.auth.uid &&
+        isValidId(data.businessId) &&
+        data.type is string && data.type.size() <= 32 &&
+        data.type in ['deadline', 'overdue', 'payment', 'task', 'approval'] &&
+        data.title is string && data.title.size() >= 1 && data.title.size() <= 160 &&
+        data.message is string && data.message.size() >= 1 && data.message.size() <= 500 &&
+        isOptionalId(data.relatedOrderId) &&
+        isOptionalId(data.relatedCustomerId) &&
+        data.read is bool &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    // 1. Users Collection (PII strictly restricted to owner)
+    match /users/{userId} {
+      allow get: if isValidId(userId) && isOwnerUid(userId);
+      allow list: if false;
+      allow create: if isOwnerUid(userId) &&
+        isValidId(userId) &&
+        isValidUser(incoming(), userId) &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+      allow update: if isOwnerUid(userId) &&
+        isValidId(userId) &&
+        isValidUser(incoming(), userId) &&
+        incoming().uid == existing().uid &&
+        incoming().businessId == existing().businessId &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time && (
+          incoming().diff(existing()).affectedKeys().hasOnly([
+            'name', 'email', 'onboardingCompleted', 'plan', 'theme', 'notificationsEnabled', 'updatedAt'
+          ])
+        );
+      allow delete: if false;
+    }
+
+    // 2. Businesses Collection
+    match /businesses/{businessId} {
+      allow get: if isValidId(businessId) && isOwnerUid(businessId) && existing().ownerId == request.auth.uid;
+      allow list: if isVerifiedUser() && existing().ownerId == request.auth.uid;
+      allow create: if isOwnerUid(businessId) &&
+        isValidId(businessId) &&
+        isValidBusiness(incoming(), businessId) &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+      allow update: if isOwnerUid(businessId) &&
+        isValidId(businessId) &&
+        isValidBusiness(incoming(), businessId) &&
+        existing().ownerId == request.auth.uid &&
+        incoming().id == existing().id &&
+        incoming().ownerId == existing().ownerId &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time && (
+          incoming().diff(existing()).affectedKeys().hasOnly([
+            'ownerName', 'name', 'businessType', 'currency', 'plan', 'updatedAt'
+          ])
+        );
+      allow delete: if false;
+    }
+
+    // 3. Customers Collection (PII isolated to owner)
+    match /customers/{customerId} {
+      allow get: if isVerifiedUser() && isValidId(customerId) && existing().ownerId == request.auth.uid;
+      allow list: if isVerifiedUser() && existing().ownerId == request.auth.uid;
+      allow create: if isVerifiedUser() &&
+        isValidId(customerId) &&
+        isValidCustomer(incoming(), customerId) &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time &&
+        businessOwnedByCaller(incoming().businessId);
+      allow update: if isVerifiedUser() &&
+        isValidId(customerId) &&
+        isValidCustomer(incoming(), customerId) &&
+        existing().ownerId == request.auth.uid &&
+        incoming().id == existing().id &&
+        incoming().ownerId == existing().ownerId &&
+        incoming().businessId == existing().businessId &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time && (
+          incoming().diff(existing()).affectedKeys().hasOnly([
+            'name', 'email', 'phone', 'instagram', 'facebook',
+            'address', 'notes', 'lastInteractionAt', 'updatedAt'
+          ])
+        );
+      allow delete: if isVerifiedUser() && isValidId(customerId) && existing().ownerId == request.auth.uid;
+    }
+
+    // 4. Orders Collection (with Terminal State Locking on Cancelled)
+    match /orders/{orderId} {
+      allow get: if isVerifiedUser() && isValidId(orderId) && existing().ownerId == request.auth.uid;
+      allow list: if isVerifiedUser() && existing().ownerId == request.auth.uid;
+      allow create: if isVerifiedUser() &&
+        isValidId(orderId) &&
+        isValidOrder(incoming(), orderId) &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time &&
+        businessOwnedByCaller(incoming().businessId) &&
+        get(/databases/$(database)/documents/customers/$(incoming().customerId)).data.ownerId == request.auth.uid;
+      allow update: if isVerifiedUser() &&
+        isValidId(orderId) &&
+        isValidOrder(incoming(), orderId) &&
+        existing().ownerId == request.auth.uid &&
+        existing().status != 'Cancelled' &&
+        incoming().id == existing().id &&
+        incoming().ownerId == existing().ownerId &&
+        incoming().businessId == existing().businessId &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time && (
+          // Action 1: Status or Archive transition
+          incoming().diff(existing()).affectedKeys().hasOnly(['status', 'archived', 'updatedAt']) ||
+          // Action 2: Payment balance sync
+          incoming().diff(existing()).affectedKeys().hasOnly(['amountPaid', 'remainingBalance', 'depositPaid', 'status', 'updatedAt']) ||
+          // Action 3: Full order details edit by owner
+          incoming().diff(existing()).affectedKeys().hasOnly([
+            'customerId', 'customerName', 'product', 'description', 'quantity',
+            'totalPrice', 'depositRequired', 'depositPaid', 'amountPaid', 'remainingBalance',
+            'orderDate', 'dueDate', 'deliveryMethod', 'trackingNumber', 'status',
+            'archived', 'customerNotes', 'internalNotes', 'updatedAt'
+          ])
+        );
+      allow delete: if isVerifiedUser() && isValidId(orderId) && existing().ownerId == request.auth.uid;
+    }
+
+    // 5. Payments Collection
+    match /payments/{paymentId} {
+      allow get: if isVerifiedUser() && isValidId(paymentId) && existing().ownerId == request.auth.uid;
+      allow list: if isVerifiedUser() && existing().ownerId == request.auth.uid;
+      allow create: if isVerifiedUser() &&
+        isValidId(paymentId) &&
+        isValidPayment(incoming(), paymentId) &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time &&
+        businessOwnedByCaller(incoming().businessId) &&
+        get(/databases/$(database)/documents/orders/$(incoming().orderId)).data.ownerId == request.auth.uid;
+      allow update: if isVerifiedUser() &&
+        isValidId(paymentId) &&
+        isValidPayment(incoming(), paymentId) &&
+        existing().ownerId == request.auth.uid &&
+        incoming().id == existing().id &&
+        incoming().ownerId == existing().ownerId &&
+        incoming().businessId == existing().businessId &&
+        incoming().orderId == existing().orderId &&
+        incoming().customerId == existing().customerId &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time && (
+          incoming().diff(existing()).affectedKeys().hasOnly(['amount', 'date', 'method', 'notes', 'updatedAt'])
+        );
+      allow delete: if isVerifiedUser() && isValidId(paymentId) && existing().ownerId == request.auth.uid;
+    }
+
+    // 6. Expenses Collection
+    match /expenses/{expenseId} {
+      allow get: if isVerifiedUser() && isValidId(expenseId) && existing().ownerId == request.auth.uid;
+      allow list: if isVerifiedUser() && existing().ownerId == request.auth.uid;
+      allow create: if isVerifiedUser() &&
+        isValidId(expenseId) &&
+        isValidExpense(incoming(), expenseId) &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time &&
+        businessOwnedByCaller(incoming().businessId);
+      allow update: if isVerifiedUser() &&
+        isValidId(expenseId) &&
+        isValidExpense(incoming(), expenseId) &&
+        existing().ownerId == request.auth.uid &&
+        incoming().id == existing().id &&
+        incoming().ownerId == existing().ownerId &&
+        incoming().businessId == existing().businessId &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time && (
+          incoming().diff(existing()).affectedKeys().hasOnly([
+            'description', 'category', 'amount', 'date', 'notes', 'updatedAt'
+          ])
+        );
+      allow delete: if isVerifiedUser() && isValidId(expenseId) && existing().ownerId == request.auth.uid;
+    }
+
+    // 7. Tasks Collection
+    match /tasks/{taskId} {
+      allow get: if isVerifiedUser() && isValidId(taskId) && existing().ownerId == request.auth.uid;
+      allow list: if isVerifiedUser() && existing().ownerId == request.auth.uid;
+      allow create: if isVerifiedUser() &&
+        isValidId(taskId) &&
+        isValidTask(incoming(), taskId) &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time &&
+        businessOwnedByCaller(incoming().businessId);
+      allow update: if isVerifiedUser() &&
+        isValidId(taskId) &&
+        isValidTask(incoming(), taskId) &&
+        existing().ownerId == request.auth.uid &&
+        incoming().id == existing().id &&
+        incoming().ownerId == existing().ownerId &&
+        incoming().businessId == existing().businessId &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time && (
+          // Action 1: Toggle completion
+          incoming().diff(existing()).affectedKeys().hasOnly(['completed', 'updatedAt']) ||
+          // Action 2: Edit task details
+          incoming().diff(existing()).affectedKeys().hasOnly([
+            'title', 'customerId', 'customerName', 'orderId', 'orderNumber',
+            'dueDate', 'priority', 'completed', 'updatedAt'
+          ])
+        );
+      allow delete: if isVerifiedUser() && isValidId(taskId) && existing().ownerId == request.auth.uid;
+    }
+
+    // 8. Notifications Collection
+    match /notifications/{notificationId} {
+      allow get: if isVerifiedUser() && isValidId(notificationId) && existing().ownerId == request.auth.uid;
+      allow list: if isVerifiedUser() && existing().ownerId == request.auth.uid;
+      allow create: if isVerifiedUser() &&
+        isValidId(notificationId) &&
+        isValidNotification(incoming(), notificationId) &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time &&
+        businessOwnedByCaller(incoming().businessId);
+      allow update: if isVerifiedUser() &&
+        isValidId(notificationId) &&
+        isValidNotification(incoming(), notificationId) &&
+        existing().ownerId == request.auth.uid &&
+        incoming().id == existing().id &&
+        incoming().ownerId == existing().ownerId &&
+        incoming().businessId == existing().businessId &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time && (
+          incoming().diff(existing()).affectedKeys().hasOnly(['read', 'updatedAt'])
+        );
+      allow delete: if isVerifiedUser() && isValidId(notificationId) && existing().ownerId == request.auth.uid;
+    }
+  }
+}
