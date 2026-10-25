@@ -1136,11 +1136,13 @@ export function buildNotifications(
   const list: AppNotification[] = [];
   const activeOrders = orders.filter((o) => !o.archived && o.status !== 'Cancelled');
 
+  const ownerPfx = sanitizeId(ownerId).slice(0, 20);
+
   for (const o of activeOrders) {
     if (isActiveOrderStatus(o.status) && o.dueDate) {
       const d = diffDays(todayIso, o.dueDate);
       if (d < 0) {
-        const id = sanitizeId(`notif_overdue_${o.id}`);
+        const id = sanitizeId(`notif_${ownerPfx}_overdue_${o.id}`);
         list.push({
           id,
           ownerId,
@@ -1153,7 +1155,7 @@ export function buildNotifications(
           read: Boolean(existingReadMap[id]),
         });
       } else if (d <= 3) {
-        const id = sanitizeId(`notif_deadline_${o.id}`);
+        const id = sanitizeId(`notif_${ownerPfx}_deadline_${o.id}`);
         list.push({
           id,
           ownerId,
@@ -1169,7 +1171,7 @@ export function buildNotifications(
     }
 
     if (o.status === 'Waiting for Customer') {
-      const id = sanitizeId(`notif_approval_${o.id}`);
+      const id = sanitizeId(`notif_${ownerPfx}_approval_${o.id}`);
       list.push({
         id,
         ownerId,
@@ -1184,7 +1186,7 @@ export function buildNotifications(
     }
 
     if (o.remainingBalance > 0 && (o.status === 'Ready' || o.status === 'Dispatched')) {
-      const id = sanitizeId(`notif_pay_${o.id}`);
+      const id = sanitizeId(`notif_${ownerPfx}_pay_${o.id}`);
       list.push({
         id,
         ownerId,
@@ -1201,7 +1203,7 @@ export function buildNotifications(
 
   const tasksToday = tasks.filter((t) => !t.completed && t.dueDate === todayIso);
   if (tasksToday.length > 0) {
-    const id = sanitizeId(`notif_tasks_${todayIso}`);
+    const id = sanitizeId(`notif_${ownerPfx}_tasks_${todayIso}`);
     list.push({
       id,
       ownerId,

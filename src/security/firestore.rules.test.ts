@@ -104,6 +104,13 @@ test('Firestore rules file enforces all 8 SoloDesk collections and default-deny 
 
   // Ensure no blanket allow read/list: if isSignedIn()
   assert.equal(/allow\s+(read|list)\s*:\s*if\s+isSignedIn\(\)\s*;/.test(rulesText), false);
+
+  // Ensure pre-onboarding getDoc on businesses/{uid} succeeds when resource == null for owner only
+  assert.ok(
+    rulesText.includes(
+      'allow get: if isValidId(businessId) && isOwnerUid(businessId) && (resource == null || existing().ownerId == request.auth.uid);'
+    )
+  );
 });
 
 test('Dirty Dozen adversarial payloads all return PERMISSION_DENIED', () => {

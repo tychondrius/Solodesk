@@ -128,15 +128,38 @@ export async function createOnboardingWorkspace(params: {
   };
 
   try {
-    await setDoc(doc(db, 'users', safeUid), userDocData);
+    const existingUser = await getDoc(doc(db, 'users', safeUid));
+    if (existingUser.exists()) {
+      await updateDoc(doc(db, 'users', safeUid), {
+        name: ownerName,
+        email,
+        onboardingCompleted: true,
+        theme: params.theme,
+        notificationsEnabled: true,
+        updatedAt: serverTimestamp(),
+      });
+    } else {
+      await setDoc(doc(db, 'users', safeUid), userDocData);
+    }
   } catch (error) {
-    handleFirestoreError(error, OperationType.CREATE, `users/${safeUid}`);
+    handleFirestoreError(error, OperationType.WRITE, `users/${safeUid}`);
   }
 
   try {
-    await setDoc(doc(db, 'businesses', safeUid), bizDocData);
+    const existingBiz = await getDoc(doc(db, 'businesses', safeUid));
+    if (existingBiz.exists()) {
+      await updateDoc(doc(db, 'businesses', safeUid), {
+        ownerName,
+        name: businessName,
+        businessType,
+        currency: params.currency,
+        updatedAt: serverTimestamp(),
+      });
+    } else {
+      await setDoc(doc(db, 'businesses', safeUid), bizDocData);
+    }
   } catch (error) {
-    handleFirestoreError(error, OperationType.CREATE, `businesses/${safeUid}`);
+    handleFirestoreError(error, OperationType.WRITE, `businesses/${safeUid}`);
   }
 
   return {

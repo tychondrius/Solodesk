@@ -305,7 +305,7 @@ service cloud.firestore {
 
     // 2. Businesses Collection
     match /businesses/{businessId} {
-      allow get: if isValidId(businessId) && isOwnerUid(businessId) && existing().ownerId == request.auth.uid;
+      allow get: if isValidId(businessId) && isOwnerUid(businessId) && (resource == null || existing().ownerId == request.auth.uid);
       allow list: if isVerifiedUser() && existing().ownerId == request.auth.uid;
       allow create: if isOwnerUid(businessId) &&
         isValidId(businessId) &&

@@ -1,4 +1,4 @@
-import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
+import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { onAuthStateChanged, reload, sendEmailVerification, signOut, User } from 'firebase/auth';
 import { auth } from '../firebase';
 import {
@@ -241,6 +241,11 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   );
   const [authModeInitial, setAuthModeInitial] = useState<'login' | 'signup'>('signup');
   const [isDemoMode, setIsDemoMode] = useState<boolean>(() => initialUrlParams.autostart);
+  const isDemoModeRef = useRef<boolean>(isDemoMode);
+  useEffect(() => {
+    isDemoModeRef.current = isDemoMode;
+  }, [isDemoMode]);
+  const unsubCollectionsRef = useRef<(() => void) | null>(null);
   const [loadingAuth, setLoadingAuth] = useState<boolean>(() => !initialUrlParams.autostart);
   const [firebaseUser, setFirebaseUser] = useState<User | null>(null);
 
@@ -330,19 +335,17 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
   // Firebase Auth listener
   useEffect(() => {
-    let unsubCollections: (() => void) | null = null;
-
     const unsubAuth = onAuthStateChanged(auth, async (u) => {
-      if (unsubCollections) {
-        unsubCollections();
-        unsubCollections = null;
+      if (unsubCollectionsRef.current) {
+        unsubCollectionsRef.current();
+        unsubCollectionsRef.current = null;
       }
 
       setFirebaseUser(u);
 
       if (!u) {
         setLoadingAuth(false);
-        if (!isDemoMode) {
+        if (!isDemoModeRef.current) {
           setScreenMode((prev) => (prev === 'auth' ? 'auth' : 'landing'));
         }
         return;
@@ -378,7 +381,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         }
         setScreenMode('app');
 
-        unsubCollections = subscribeWorkspaceCollections(u.uid, {
+        unsubCollectionsRef.current = subscribeWorkspaceCollections(u.uid, {
           onCustomers: setCustomers,
           onOrders: setOrders,
           onPayments: setPayments,
@@ -396,9 +399,12 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
     return () => {
       unsubAuth();
-      if (unsubCollections) unsubCollections();
+      if (unsubCollectionsRef.current) {
+        unsubCollectionsRef.current();
+        unsubCollectionsRef.current = null;
+      }
     };
-  }, [isDemoMode, showToast]);
+  }, [showToast]);
 
   const notifications = useMemo(() => {
     if (userProfile && !userProfile.notificationsEnabled) return [];
@@ -452,16 +458,26 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     if (!auth.currentUser) return;
     await reload(auth.currentUser);
     if (auth.currentUser.emailVerified) {
+      const uid = auth.currentUser.uid;
       setFirebaseUser({ ...auth.currentUser } as User);
-      const { userProfile: up, businessProfile: bp } = await fetchUserAndBusiness(
-        auth.currentUser.uid
-      );
-      if (!up || !bp) {
+      const { userProfile: up, businessProfile: bp } = await fetchUserAndBusiness(uid);
+      if (!up || !bp || !up.onboardingCompleted) {
         setScreenMode('onboarding');
       } else {
         setUserProfile(up);
         setBusiness(bp);
         setScreenMode('app');
+        if (unsubCollectionsRef.current) {
+          unsubCollectionsRef.current();
+        }
+        unsubCollectionsRef.current = subscribeWorkspaceCollections(uid, {
+          onCustomers: setCustomers,
+          onOrders: setOrders,
+          onPayments: setPayments,
+          onExpenses: setExpenses,
+          onTasks: setTasks,
+          onNotifications: setStoredNotifications,
+        });
       }
     } else {
       showToast('Email is not marked verified yet — please click the link in your inbox.', 'info');
@@ -475,6 +491,10 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   }, [showToast]);
 
   const logout = useCallback(async () => {
+    if (unsubCollectionsRef.current) {
+      unsubCollectionsRef.current();
+      unsubCollectionsRef.current = null;
+    }
     if (isDemoMode) {
       setIsDemoMode(false);
       setScreenMode('landing');
@@ -505,23 +525,33 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       return;
     }
 
+    const existingCustIds = new Set(customers.map((x) => x.id));
+    const existingOrderIds = new Set(orders.map((x) => x.id));
+    const existingPayIds = new Set(payments.map((x) => x.id));
+    const existingExpIds = new Set(expenses.map((x) => x.id));
+    const existingTaskIds = new Set(tasks.map((x) => x.id));
+
     for (const c of sample.customers) {
-      await saveCustomerFirestore(c, true);
+      await saveCustomerFirestore(c, !existingCustIds.has(c.id));
     }
     for (const o of sample.orders) {
-      await saveOrderFirestore(o, true);
+      await saveOrderFirestore(o, !existingOrderIds.has(o.id));
     }
     for (const p of sample.payments) {
-      await createPaymentFirestore(p);
+      if (!existingPayIds.has(p.id)) {
+        await createPaymentFirestore(p);
+      }
     }
     for (const e of sample.expenses) {
-      await createExpenseFirestore(e);
+      if (!existingExpIds.has(e.id)) {
+        await createExpenseFirestore(e);
+      }
     }
     for (const t of sample.tasks) {
-      await saveTaskFirestore(t, true);
+      await saveTaskFirestore(t, !existingTaskIds.has(t.id));
     }
     showToast('Sample orders and customers added to your workspace.', 'success');
-  }, [isDemoMode, firebaseUser, todayIso, showToast]);
+  }, [isDemoMode, firebaseUser, todayIso, customers, orders, payments, expenses, tasks, showToast]);
 
   const completeOnboarding = useCallback(
     async (params: {
@@ -547,8 +577,10 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       setScreenMode('app');
       setActiveSection('dashboard');
 
-      // Subscribe right away
-      subscribeWorkspaceCollections(firebaseUser.uid, {
+      if (unsubCollectionsRef.current) {
+        unsubCollectionsRef.current();
+      }
+      unsubCollectionsRef.current = subscribeWorkspaceCollections(firebaseUser.uid, {
         onCustomers: setCustomers,
         onOrders: setOrders,
         onPayments: setPayments,

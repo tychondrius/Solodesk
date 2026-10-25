@@ -598,9 +598,35 @@ export function createLunaDemoSeed(
     },
   ];
 
+  const pfx =
+    ownerId === 'demo_luna_owner'
+      ? ''
+      : `${ownerId.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 20)}_`;
+  const mapId = (rawId: string) => (rawId ? `${pfx}${rawId}` : '');
+
+  const scopedCustomers = customers.map((c) => ({ ...c, id: mapId(c.id) }));
+  const scopedOrders = orders.map((o) => ({
+    ...o,
+    id: mapId(o.id),
+    customerId: mapId(o.customerId),
+  }));
+  const scopedPayments = payments.map((p) => ({
+    ...p,
+    id: mapId(p.id),
+    orderId: mapId(p.orderId),
+    customerId: mapId(p.customerId),
+  }));
+  const scopedExpenses = expenses.map((e) => ({ ...e, id: mapId(e.id) }));
+  const scopedTasks = tasks.map((t) => ({
+    ...t,
+    id: mapId(t.id),
+    customerId: mapId(t.customerId),
+    orderId: mapId(t.orderId),
+  }));
+
   const notifications = buildNotifications(
-    orders,
-    tasks,
+    scopedOrders,
+    scopedTasks,
     {},
     ownerId,
     businessId,
@@ -611,11 +637,11 @@ export function createLunaDemoSeed(
   return {
     user,
     business,
-    customers,
-    orders,
-    payments,
-    expenses,
-    tasks,
+    customers: scopedCustomers,
+    orders: scopedOrders,
+    payments: scopedPayments,
+    expenses: scopedExpenses,
+    tasks: scopedTasks,
     notifications,
   };
 }
